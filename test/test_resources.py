@@ -178,7 +178,7 @@ async def _read_resource_async(uri: str, port: int, transport: str = "stdio") ->
         
         # Resources 只存在于 IDA 实例中，直接连接到实例
         # (proxy 只转发 tools，不支持 resources)
-        mcp_url = f"http://{DEFAULT_HOST}:{port}/mcp/"
+        mcp_url = f"http://{DEFAULT_HOST}:{port}/mcp"
         
         async with Client(mcp_url, timeout=REQUEST_TIMEOUT) as client:
             # 读取资源 - 返回 list[TextResourceContents | BlobResourceContents]
@@ -232,7 +232,7 @@ async def _list_resources_async(port: int, transport: str = "stdio") -> Dict[str
         from fastmcp import Client
         
         # Resources 只存在于 IDA 实例中
-        mcp_url = f"http://{DEFAULT_HOST}:{port}/mcp/"
+        mcp_url = f"http://{DEFAULT_HOST}:{port}/mcp"
         
         async with Client(mcp_url, timeout=REQUEST_TIMEOUT) as client:
             result = await client.list_resources()

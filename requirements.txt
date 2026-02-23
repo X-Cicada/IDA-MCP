@@ -1,2 +1,2 @@
-fastmcp==2.13.2
+fastmcp>=2.13.2
 pytest==9.0.1

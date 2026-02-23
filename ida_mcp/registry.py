@@ -280,7 +280,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):  # pragma: no cover
             _debug_log('CALL_BEGIN', tool=tool, target_port=port, pid=target.get('pid'), params_keys=list((params or {}).keys()), timeout=effective_timeout)
             # Forward the tool call over HTTP MCP (JSON-RPC) using fastmcp Client dynamically.
             # 内部通信固定使用 127.0.0.1（协调器与实例在同一台机器上）
-            mcp_url = f"http://{LOCALHOST}:{port}/mcp/"
+            mcp_url = f"http://{LOCALHOST}:{port}/mcp"
             
             # 先验证端口是否可连接
             try:
