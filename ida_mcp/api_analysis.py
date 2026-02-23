@@ -220,7 +220,7 @@ def _disasm_single(query: str) -> dict:
             comment = ' // '.join(cmt_parts) if cmt_parts else None
             
             instructions.append({
-                'ea': int(head_ea),
+                'ea': hex_addr(int(head_ea)),
                 'bytes': b_hex,
                 'text': text,
                 'comment': comment,
@@ -231,8 +231,8 @@ def _disasm_single(query: str) -> dict:
     return {
         'query': query,
         'name': name,
-        'start_ea': start,
-        'end_ea': end,
+        'start_ea': hex_addr(start),
+        'end_ea': hex_addr(end),
         'instructions': instructions,
         'error': None,
     }
@@ -316,7 +316,7 @@ def linear_disassemble(
                 b_hex = None
             
             collected.append({
-                'ea': int(ea),
+                'ea': hex_addr(int(ea)),
                 'bytes': b_hex,
                 'text': text,
                 'is_code': is_code,
@@ -332,7 +332,7 @@ def linear_disassemble(
         return {'error': 'no_instructions'}
     
     result: dict = {
-        'start_address': int(addr_int),
+        'start_address': hex_addr(int(addr_int)),
         'count': count,
         'instructions': collected,
     }
@@ -519,7 +519,7 @@ def xrefs_to_field(
                             hit = True
                     
                     if hit:
-                        matches.append({'ea': int(ea), 'line': line})
+                        matches.append({'ea': hex_addr(int(ea)), 'line': line})
                         if len(matches) >= MAX_MATCH:
                             truncated = True
                             break

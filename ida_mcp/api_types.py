@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 from typing import Annotated, Optional, List, Dict, Any, Union
 
+from .compat import get_idati as _get_idati
 from .rpc import tool
 from .sync import idaread, idawrite
 from .utils import parse_address, is_valid_c_identifier, hex_addr
@@ -140,8 +141,8 @@ def _declare_type_fallback(decl_text: str) -> dict:
     parse_errors: List[str] = []
     
     variants = [
-        ("idaapi.parse_decl", lambda: idaapi.parse_decl(tinfo, idaapi.cvar.idati, decl_text, PT_SIL)),  # type: ignore
-        ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tinfo, idaapi.cvar.idati, decl_text, PT_SIL)),  # type: ignore
+        ("idaapi.parse_decl", lambda: idaapi.parse_decl(tinfo, _get_idati(), decl_text, PT_SIL)),  # type: ignore
+        ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tinfo, _get_idati(), decl_text, PT_SIL)),  # type: ignore
     ]
     
     for label, fn in variants:
@@ -162,7 +163,7 @@ def _declare_type_fallback(decl_text: str) -> dict:
     # 检查是否已存在
     existed = False
     try:
-        existed = bool(ida_typeinf.get_named_type(idaapi.cvar.idati, name, 0))  # type: ignore
+        existed = bool(ida_typeinf.get_named_type(_get_idati(), name, 0))  # type: ignore
     except Exception:
         existed = False
     
@@ -173,7 +174,7 @@ def _declare_type_fallback(decl_text: str) -> dict:
     # 方法 1: set_named_type
     try:
         flags = getattr(ida_typeinf, 'NTF_REPLACE', 0) if existed else 0
-        ok = bool(ida_typeinf.set_named_type(idaapi.cvar.idati, name, flags, tinfo, 0))  # type: ignore
+        ok = bool(ida_typeinf.set_named_type(_get_idati(), name, flags, tinfo, 0))  # type: ignore
     except AttributeError as e:
         set_errors.append(f"set_named_type: {e}")
     except Exception as e:
@@ -262,8 +263,8 @@ def set_function_prototype(
     parse_errors: List[str] = []
     
     variants = [
-        ("idaapi.parse_decl", lambda: idaapi.parse_decl(tinfo, idaapi.cvar.idati, proto_text, PT_SIL)),  # type: ignore
-        ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tinfo, idaapi.cvar.idati, proto_text, PT_SIL)),  # type: ignore
+        ("idaapi.parse_decl", lambda: idaapi.parse_decl(tinfo, _get_idati(), proto_text, PT_SIL)),  # type: ignore
+        ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tinfo, _get_idati(), proto_text, PT_SIL)),  # type: ignore
     ]
     
     for label, fn in variants:
@@ -394,8 +395,8 @@ def set_local_variable_type(
     candidate_decl = f"{type_text} tmp;"
     
     variants = [
-        ("idaapi.parse_decl", lambda: idaapi.parse_decl(tinfo, idaapi.cvar.idati, candidate_decl, PT_SIL)),  # type: ignore
-        ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tinfo, idaapi.cvar.idati, candidate_decl, PT_SIL)),  # type: ignore
+        ("idaapi.parse_decl", lambda: idaapi.parse_decl(tinfo, _get_idati(), candidate_decl, PT_SIL)),  # type: ignore
+        ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tinfo, _get_idati(), candidate_decl, PT_SIL)),  # type: ignore
     ]
     
     for label, fn in variants:
@@ -496,8 +497,8 @@ def set_global_variable_type(
     errors: List[str] = []
     
     variants = [
-        ("idaapi.parse_decl", lambda: idaapi.parse_decl(tinfo, idaapi.cvar.idati, candidate, PT_SIL)),  # type: ignore
-        ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tinfo, idaapi.cvar.idati, candidate, PT_SIL)),  # type: ignore
+        ("idaapi.parse_decl", lambda: idaapi.parse_decl(tinfo, _get_idati(), candidate, PT_SIL)),  # type: ignore
+        ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tinfo, _get_idati(), candidate, PT_SIL)),  # type: ignore
     ]
     
     for label, fn in variants:

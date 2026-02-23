@@ -22,6 +22,7 @@ import re
 from .rpc import resource
 from .sync import idaread
 from .utils import hex_addr
+from .compat import get_idati as _get_idati
 
 # IDA 模块导入
 import idaapi  # type: ignore
@@ -147,13 +148,13 @@ def _list_strings_internal(pattern: Optional[str]) -> list:
     
     if substr:
         items = [
-            {'ea': ea, 'length': length, 'text': text}
+            {'ea': hex_addr(ea), 'length': length, 'text': text}
             for ea, length, _stype, text in cached
             if substr in text.lower()
         ]
     else:
         items = [
-            {'ea': ea, 'length': length, 'text': text}
+            {'ea': hex_addr(ea), 'length': length, 'text': text}
             for ea, length, _stype, text in cached
         ]
     
@@ -244,7 +245,7 @@ def _list_types_internal(pattern: Optional[str]) -> list:
     
     for ordinal in range(1, qty + 1):
         try:
-            name = ida_typeinf.get_numbered_type_name(idaapi.cvar.idati, ordinal)  # type: ignore
+            name = ida_typeinf.get_numbered_type_name(_get_idati(), ordinal)  # type: ignore
         except Exception:
             name = None
         if not name:
@@ -253,7 +254,7 @@ def _list_types_internal(pattern: Optional[str]) -> list:
         decl = None
         try:
             tif = ida_typeinf.tinfo_t()
-            ida_typeinf.get_numbered_type(idaapi.cvar.idati, ordinal, tif)  # type: ignore
+            ida_typeinf.get_numbered_type(_get_idati(), ordinal, tif)  # type: ignore
             try:
                 decl = ida_typeinf.print_tinfo('', 0, 0, ida_typeinf.PRTYPE_1LINE, tif, name, '')  # type: ignore
             except Exception:

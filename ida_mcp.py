@@ -356,7 +356,7 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
             port = int(env_port)
         else:
             port = _find_free_port(DEFAULT_PORT, host)
-        _info(f"Starting MCP server at http://{host}:{port}/mcp/ (toggle to stop)")
+        _info(f"Starting MCP server at http://{host}:{port}/mcp (toggle to stop)")
         start_server_async(host, port)
         # 在后台预构建字符串缓存，避免首次 list_strings 调用超时
         _warmup_caches()

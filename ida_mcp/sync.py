@@ -38,13 +38,14 @@ def _run_in_ida(fn: Callable[[], Any], write: bool = False) -> Any:
             result_box["value"] = fn()
         except Exception as e:
             result_box["error"] = repr(e)
+            result_box["exc"] = e
         return 0
     
     flag = ida_kernwin.MFF_WRITE if write else ida_kernwin.MFF_READ
     ida_kernwin.execute_sync(wrapper, flag)
     
     if "error" in result_box:
-        raise RuntimeError(result_box["error"])
+        raise RuntimeError(result_box["error"]) from result_box.get("exc")
     return result_box.get("value")
 
 
