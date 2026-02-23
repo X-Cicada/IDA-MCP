@@ -137,26 +137,35 @@ def get_metadata() -> dict:
     
     # 获取架构/位宽
     arch: Optional[str] = None
-    bits = 0
+    is_64 = False
+
+    # --- 方法 1: ida_ida 模块函数 (IDA 9.x 推荐) ---
     try:
-        inf = idaapi.get_inf_structure()  # type: ignore
-        arch = getattr(inf, 'procname', None) or getattr(inf, 'procName', None)
+        import ida_ida  # type: ignore
+        arch = ida_ida.inf_get_procname()
         if isinstance(arch, bytes):
             arch = arch.decode(errors='ignore')
-        
-        is_64 = False
-        try:
-            is_64 = inf.is_64bit()
-        except Exception:
-            try:
-                is_64 = bool(getattr(inf, 'is_64bit', lambda: False)())
-            except Exception:
-                is_64 = False
-        bits = 64 if is_64 else 32
+        is_64 = ida_ida.inf_is_64bit()
     except Exception:
         pass
-    
-    # 回退获取架构
+
+    # --- 方法 2: get_inf_structure (IDA 8.x 兼容) ---
+    if not arch:
+        try:
+            inf = idaapi.get_inf_structure()  # type: ignore
+            arch = getattr(inf, 'procname', None) or getattr(inf, 'procName', None)
+            if isinstance(arch, bytes):
+                arch = arch.decode(errors='ignore')
+        except Exception:
+            pass
+    if not is_64:
+        try:
+            inf = idaapi.get_inf_structure()  # type: ignore
+            is_64 = inf.is_64bit()
+        except Exception:
+            pass
+
+    # --- 方法 3: 回退获取架构 ---
     if not arch:
         for fn_name in ('ph_get_idp_name', 'get_idp_name', 'ph_get_id', 'ph_get_idp_desc'):
             try:
@@ -170,16 +179,25 @@ def get_metadata() -> dict:
                         break
             except Exception:
                 continue
-    
-    # 回退获取位宽
-    if not bits:
+
+    # --- 方法 4: 从段位宽推断 64-bit ---
+    if not is_64:
         try:
-            if getattr(idaapi, '__EA64__', False):
-                bits = 64
-            else:
-                bits = 32
+            import ida_segment  # type: ignore
+            seg = ida_segment.get_first_seg()
+            if seg and seg.bitness == 2:  # 0=16bit, 1=32bit, 2=64bit
+                is_64 = True
         except Exception:
-            bits = 0
+            pass
+
+    # --- 方法 5: __EA64__ 标志 ---
+    if not is_64:
+        try:
+            is_64 = bool(getattr(idaapi, '__EA64__', False))
+        except Exception:
+            pass
+
+    bits = 64 if is_64 else 32
     
     # 计算文件哈希
     file_hash: Optional[str] = None
@@ -199,13 +217,17 @@ def get_metadata() -> dict:
     # 端序
     endian = None
     try:
-        inf3 = idaapi.get_inf_structure()  # type: ignore
-        if hasattr(inf3, 'is_be') and inf3.is_be():
-            endian = 'big'
-        else:
-            endian = 'little'
+        import ida_ida  # type: ignore
+        endian = 'big' if ida_ida.inf_is_be() else 'little'
     except Exception:
-        endian = None
+        try:
+            inf3 = idaapi.get_inf_structure()  # type: ignore
+            if hasattr(inf3, 'is_be') and inf3.is_be():
+                endian = 'big'
+            else:
+                endian = 'little'
+        except Exception:
+            endian = None
     
     return {
         "input_file": input_file,
