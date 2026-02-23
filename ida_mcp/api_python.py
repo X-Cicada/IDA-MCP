@@ -93,7 +93,7 @@ def py_eval(
             "ida_funcs": ida_funcs,
             "ida_gdl": _lazy_import("ida_gdl"),
             "ida_graph": _lazy_import("ida_graph"),
-            "ida_hexrays": ida_hexrays,
+            "ida_hexrays": _lazy_import("ida_hexrays"),
             "ida_ida": ida_ida,
             "ida_idd": _lazy_import("ida_idd"),
             "ida_idp": _lazy_import("ida_idp"),
