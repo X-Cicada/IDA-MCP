@@ -302,7 +302,7 @@ def normalize_arch(raw: Optional[str], bits: int) -> Optional[str]:
     if r in ("aarch64", "arm64") or r.startswith("arm64"):
         return "arm64"
     if r.startswith("arm"):
-        return "arm"
+        return "arm64" if bits == 64 else "arm"
     
     # MIPS
     if r in ("mips64", "mips64el"):
