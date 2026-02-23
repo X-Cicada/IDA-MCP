@@ -107,9 +107,23 @@ def get_u64(
     return _read_int(addr, 8, signed=False)
 
 
+def _get_byteorder() -> str:
+    """获取 IDB 端序 (little / big)。"""
+    try:
+        import ida_ida  # type: ignore
+        return 'big' if ida_ida.inf_is_be() else 'little'
+    except Exception:
+        try:
+            inf = idaapi.get_inf_structure()  # type: ignore
+            return 'big' if inf.is_be() else 'little'
+        except Exception:
+            return 'little'
+
+
 def _read_int(addr: Union[int, str], size: int, signed: bool = False) -> List[dict]:
     """内部: 读取整数。"""
     queries = normalize_list_input(addr)
+    byteorder = _get_byteorder()
     results = []
     
     for query in queries:
@@ -125,8 +139,7 @@ def _read_int(addr: Union[int, str], size: int, signed: bool = False) -> List[di
                 results.append({"error": "failed to read", "query": query, "address": hex_addr(address)})
                 continue
             
-            # 小端序解析
-            value = int.from_bytes(data, byteorder='little', signed=signed)
+            value = int.from_bytes(data, byteorder=byteorder, signed=signed)
             
             results.append({
                 "query": query,

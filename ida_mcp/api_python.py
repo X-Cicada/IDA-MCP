@@ -19,7 +19,6 @@ import idaapi  # type: ignore
 import idc  # type: ignore
 import ida_bytes  # type: ignore
 import ida_funcs  # type: ignore
-import ida_hexrays  # type: ignore
 import ida_kernwin  # type: ignore
 import ida_nalt  # type: ignore
 import ida_name  # type: ignore
@@ -76,7 +75,7 @@ def py_eval(
             "ida_funcs": ida_funcs,
             "ida_gdl": _lazy_import("ida_gdl"),
             "ida_graph": _lazy_import("ida_graph"),
-            "ida_hexrays": ida_hexrays,
+            "ida_hexrays": _lazy_import("ida_hexrays"),
             "ida_ida": ida_ida,
             "ida_idd": _lazy_import("ida_idd"),
             "ida_idp": _lazy_import("ida_idp"),
