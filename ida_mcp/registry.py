@@ -305,14 +305,21 @@ class _Handler(http.server.BaseHTTPRequestHandler):  # pragma: no cover
                 return
             
             try:
-                from fastmcp import Client  # type: ignore
                 import asyncio
-                
+                from mcp import ClientSession  # type: ignore
+                from mcp.client.streamable_http import streamable_http_client  # type: ignore
+                import httpx  # type: ignore
+
                 async def _do():
-                    async with Client(mcp_url, timeout=effective_timeout) as c:  # type: ignore
-                        resp = await c.call_tool(tool, params)
+                    http_timeout = httpx.Timeout(effective_timeout + 15)
+                    async with streamable_http_client(mcp_url, timeout=http_timeout) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await asyncio.wait_for(session.initialize(), timeout=effective_timeout)
+                            resp = await asyncio.wait_for(
+                                session.call_tool(tool, arguments=params or {}),
+                                timeout=effective_timeout,
+                            )
                         # Extract data from response content (JSON text)
-                        # fastmcp returns data in resp.content[0].text as JSON string
                         data = None
                         if hasattr(resp, 'content') and resp.content:
                             for item in resp.content:
@@ -337,7 +344,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):  # pragma: no cover
                                 return x
                             data = norm(resp.data)
                         return {"tool": tool, "data": data}
-                
+
                 result = asyncio.run(_do())
                 
                 dt_ms = int((time.time() - t0) * 1000)
