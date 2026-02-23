@@ -33,7 +33,7 @@ HTTP 接口
 转发机制 (/call)
 --------------------
 1. 客户端 (或代理) 提交: { tool, params, pid|port }
-2. 协调器定位目标实例端口, 使用 fastmcp.Client 临时发起一次真实工具调用。
+2. 协调器定位目标实例端口, 使用 streamable_http_client 发起一次真实工具调用。
 3. 对返回对象做 “可 JSON 序列化” 处理 (递归转普通结构) 后返回。
 
 并发与线程
@@ -390,7 +390,8 @@ def _start_coordinator():  # pragma: no cover
         return
     def run():
         try:
-            httpd = http.server.HTTPServer((COORD_HOST, COORD_PORT), _Handler)
+            from http.server import ThreadingHTTPServer
+            httpd = ThreadingHTTPServer((COORD_HOST, COORD_PORT), _Handler)
             httpd.serve_forever()
         except Exception:
             pass

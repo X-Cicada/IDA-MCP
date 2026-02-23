@@ -125,17 +125,14 @@ def list_instances() -> List[dict]:
 # IDB 元数据
 # ============================================================================
 
-@tool
 @idaread
-def get_metadata() -> dict:
-    """Get IDB metadata (input_file, arch, bits, endian, hash)."""
-    # 获取输入文件
+def _get_metadata_ida() -> dict:
+    """在 IDA 主线程中读取 IDB 元数据 (不含文件哈希)。"""
     try:
         input_file = idaapi.get_input_file_path()
     except Exception:
         input_file = None
-    
-    # 获取架构/位宽
+
     arch: Optional[str] = None
     is_64 = False
 
@@ -183,9 +180,8 @@ def get_metadata() -> dict:
     # --- 方法 4: 从段位宽推断 64-bit ---
     if not is_64:
         try:
-            import ida_segment  # type: ignore
             seg = ida_segment.get_first_seg()
-            if seg and seg.bitness == 2:  # 0=16bit, 1=32bit, 2=64bit
+            if seg and seg.bitness == 2:
                 is_64 = True
         except Exception:
             pass
@@ -197,23 +193,6 @@ def get_metadata() -> dict:
         except Exception:
             pass
 
-    bits = 64 if is_64 else 32
-    
-    # 计算文件哈希
-    file_hash: Optional[str] = None
-    if input_file and os.path.isfile(input_file):
-        try:
-            h = hashlib.sha256()
-            with open(input_file, 'rb') as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b''):
-                    h.update(chunk)
-            file_hash = h.hexdigest()
-        except Exception:
-            file_hash = None
-    
-    # 归一化架构
-    arch_normalized = normalize_arch(arch, bits)
-    
     # 端序
     endian = None
     try:
@@ -222,20 +201,39 @@ def get_metadata() -> dict:
     except Exception:
         try:
             inf3 = idaapi.get_inf_structure()  # type: ignore
-            if hasattr(inf3, 'is_be') and inf3.is_be():
-                endian = 'big'
-            else:
-                endian = 'little'
+            endian = 'big' if hasattr(inf3, 'is_be') and inf3.is_be() else 'little'
         except Exception:
             endian = None
-    
+
+    bits = 64 if is_64 else 32
     return {
         "input_file": input_file,
-        "arch": arch_normalized or arch,
+        "arch": normalize_arch(arch, bits) or arch,
         "bits": bits,
         "endian": endian,
-        "hash": file_hash,
     }
+
+
+@tool
+def get_metadata() -> dict:
+    """Get IDB metadata (input_file, arch, bits, endian, hash)."""
+    meta = _get_metadata_ida()
+
+    # SHA256 哈希在 IDA 主线程外计算，避免阻塞 IDA UI
+    input_file = meta.get("input_file")
+    file_hash: Optional[str] = None
+    if input_file and os.path.isfile(input_file):
+        try:
+            h = hashlib.sha256()
+            with open(input_file, 'rb') as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                    h.update(chunk)
+            file_hash = h.hexdigest()
+        except Exception:
+            file_hash = None
+
+    meta["hash"] = file_hash
+    return meta
 
 
 # ============================================================================
@@ -310,22 +308,22 @@ def get_function(
         except Exception:
             pass
     
-    # 作为名称查找
-    for ea in idautils.Functions():
-        try:
-            fn_name = idaapi.get_func_name(ea)
-        except Exception:
-            continue
-        if fn_name == query:
-            f = ida_funcs.get_func(ea)
+    # 作为名称查找 (O(1): get_name_ea 直接查符号表)
+    try:
+        name_ea = idaapi.get_name_ea(idaapi.BADADDR, str(query))
+        if name_ea != idaapi.BADADDR:
+            f = ida_funcs.get_func(name_ea)
             if f:
+                fn_name = idaapi.get_func_name(f.start_ea)
                 return {
                     "name": fn_name,
                     "start_ea": hex_addr(f.start_ea),
                     "end_ea": hex_addr(f.end_ea),
                     "query": query,
                 }
-    
+    except Exception:
+        pass
+
     return {"error": "not found", "query": query}
 
 

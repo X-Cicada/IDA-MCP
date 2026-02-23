@@ -35,7 +35,7 @@ _CONFIG_FILE = os.path.join(_CONFIG_DIR, "config.conf")
 # 默认配置
 _DEFAULT_CONFIG = {
     # 传输方式开关
-    "enable_stdio": False,   # 是否启用 stdio 模式（协调器）
+    "enable_stdio": True,    # 是否启用 stdio 模式（协调器）
     "enable_http": True,    # 是否启用 HTTP 代理模式
     
     # 协调器配置（地址固定为 127.0.0.1，仅端口可配置）
