@@ -228,7 +228,7 @@ def dbg_list_bps() -> dict:
         if ea in (None, idaapi.BADADDR):
             continue
         
-        info: dict = {'ea': int(ea)}
+        info: dict = {'ea': hex_addr(int(ea))}
         
         # flags / enabled
         flags = None
@@ -532,7 +532,7 @@ def _set_breakpoint_single(query: str) -> dict:
     result: dict = {
         'query': query,
         'ok': ok,
-        'ea': int(address),
+        'ea': hex_addr(int(address)),
         'existed': bool(existed and not added),
         'added': bool(added),
         'error': None,
@@ -592,7 +592,7 @@ def _delete_breakpoint_single(query: str) -> dict:
     result: dict = {
         'query': query,
         'ok': ok,
-        'ea': int(address),
+        'ea': hex_addr(int(address)),
         'existed': bool(existed),
         'deleted': bool(deleted),
         'error': None,
@@ -686,7 +686,7 @@ def _enable_breakpoint_single(address: int, enable: bool) -> dict:
     
     result: dict = {
         'ok': existed,
-        'ea': int(address),
+        'ea': hex_addr(int(address)),
         'existed': bool(existed),
         'enabled': bool(enabled_now),
         'changed': bool(changed),
@@ -782,14 +782,25 @@ def dbg_step_over() -> dict:
 @tool
 @idaread
 def dbg_read_mem(
-    regions: Annotated[List[Dict[str, Any]], "List of {address, size}"],
+    addr: Annotated[Optional[str], "Memory address (flat param from proxy)"] = None,
+    size: Annotated[int, "Bytes to read (flat param from proxy)"] = 64,
+    regions: Annotated[Optional[List[Dict[str, Any]]], "List of {address, size} (batch mode)"] = None,
 ) -> List[dict]:
-    """Read memory from debugged process."""
+    """Read memory from debugged process.
+    
+    Accepts both flat params (addr, size) from proxy and regions list for batch.
+    """
     try:
         if not ida_dbg.is_debugger_on():
             return [{"error": "debugger not active"}]
     except Exception:
         return [{"error": "cannot determine debugger state"}]
+    
+    # Normalize: flat params -> regions list
+    if regions is None:
+        if addr is None:
+            return [{"error": "address is required (pass 'addr' or 'regions')"}]
+        regions = [{"address": addr, "size": size}]
     
     results = []
     
@@ -819,7 +830,7 @@ def dbg_read_mem(
             
             results.append({
                 "address": hex_addr(address),
-                "size": hex_addr(len(byte_list)),
+                "size": len(byte_list),
                 "bytes": byte_list,
                 "hex": hex_str,
                 "error": None,
@@ -833,14 +844,30 @@ def dbg_read_mem(
 @tool
 @idawrite
 def dbg_write_mem(
-    regions: Annotated[List[Dict[str, Any]], "List of {address, bytes: [int,...]}"],
+    addr: Annotated[Optional[str], "Memory address (flat param from proxy)"] = None,
+    data: Annotated[Optional[str], "Hex string to write (flat param from proxy)"] = None,
+    regions: Annotated[Optional[List[Dict[str, Any]]], "List of {address, bytes: [int,...]} (batch mode)"] = None,
 ) -> List[dict]:
-    """Write memory to debugged process."""
+    """Write memory to debugged process.
+    
+    Accepts both flat params (addr, data) from proxy and regions list for batch.
+    """
     try:
         if not ida_dbg.is_debugger_on():
             return [{"error": "debugger not active"}]
     except Exception:
         return [{"error": "cannot determine debugger state"}]
+    
+    # Normalize: flat params -> regions list
+    if regions is None:
+        if addr is None:
+            return [{"error": "address is required (pass 'addr'+'data' or 'regions')"}]
+        # Convert hex string to byte list if needed
+        byte_list = []
+        if data:
+            hex_clean = data.replace(' ', '').replace('0x', '').replace('0X', '')
+            byte_list = [int(hex_clean[i:i+2], 16) for i in range(0, len(hex_clean), 2)]
+        regions = [{"address": addr, "bytes": byte_list}]
     
     results = []
     
@@ -865,7 +892,7 @@ def dbg_write_mem(
             
             results.append({
                 "address": hex_addr(address),
-                "size": hex_addr(len(byte_data)),
+                "size": len(byte_data),
                 "written": written,
                 "error": None,
             })

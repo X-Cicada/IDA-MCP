@@ -25,6 +25,7 @@ from typing import Annotated, Optional, List, Union
 from .rpc import tool
 from .sync import idaread
 from .utils import parse_address, paginate, pattern_filter, normalize_arch, hex_addr
+from .compat import get_idati as _get_idati
 
 # IDA 模块导入
 import idaapi  # type: ignore
@@ -402,13 +403,13 @@ def list_strings(
     
     if substr:
         items = [
-            {'ea': ea, 'length': length, 'type': stype, 'text': text}
+            {'ea': hex_addr(ea), 'length': length, 'type': stype, 'text': text}
             for ea, length, stype, text in cached
             if substr in text.lower()
         ]
     else:
         items = [
-            {'ea': ea, 'length': length, 'type': stype, 'text': text}
+            {'ea': hex_addr(ea), 'length': length, 'type': stype, 'text': text}
             for ea, length, stype, text in cached
         ]
     
@@ -432,7 +433,7 @@ def list_local_types() -> dict:
     max_len = 512
     for ordinal in range(1, qty + 1):
         try:
-            name = ida_typeinf.get_numbered_type_name(idaapi.cvar.idati, ordinal)  # type: ignore
+            name = ida_typeinf.get_numbered_type_name(_get_idati(), ordinal)  # type: ignore
         except Exception:
             name = None
         if not name:
@@ -441,7 +442,7 @@ def list_local_types() -> dict:
         decl = None
         try:
             tif = ida_typeinf.tinfo_t()
-            ida_typeinf.get_numbered_type(idaapi.cvar.idati, ordinal, tif)  # type: ignore
+            ida_typeinf.get_numbered_type(_get_idati(), ordinal, tif)  # type: ignore
             try:
                 decl = ida_typeinf.print_tinfo('', 0, 0, ida_typeinf.PRTYPE_1LINE, tif, name, '')  # type: ignore
             except Exception:
@@ -496,7 +497,7 @@ def get_entry_points() -> dict:
                     name = None
             out.append({
                 'ordinal': int(ordv),
-                'ea': int(ea),
+                'ea': hex_addr(int(ea)),
                 'name': name,
             })
         except Exception:

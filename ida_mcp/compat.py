@@ -25,6 +25,18 @@ import ida_typeinf  # type: ignore
 import idc  # type: ignore
 
 
+def get_idati():
+    """Get the default type info library, compatible with IDA 8.x and 9.x.
+    
+    IDA 9.x: ida_typeinf.get_idati()
+    IDA 8.x: idaapi.cvar.idati
+    """
+    try:
+        return ida_typeinf.get_idati()
+    except AttributeError:
+        return idaapi.cvar.idati
+
+
 # ============================================================================
 # 结构体 ID 和获取
 # ============================================================================
@@ -180,7 +192,7 @@ def get_member_tinfo(tif: Any, m: Any) -> bool:
     if isinstance(m, _MemberCompat):
         try:
             # IDA 9.x 中结构体成员类型需要通过 ida_typeinf 获取
-            sptr = ida_typeinf.get_idati().get_numbered_type(m.sid)
+            sptr = get_idati().get_numbered_type(m.sid)
             if sptr:
                 udt = ida_typeinf.udt_type_data_t()
                 if sptr.get_udt_details(udt):
