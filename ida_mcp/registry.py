@@ -312,7 +312,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):  # pragma: no cover
 
                 async def _do():
                     http_timeout = httpx.Timeout(effective_timeout + 15)
-                    async with streamable_http_client(mcp_url, timeout=http_timeout) as (read, write):
+                    http_client = httpx.AsyncClient(timeout=http_timeout)
+                    async with streamable_http_client(mcp_url, http_client=http_client) as (read, write, _get_sid):
                         async with ClientSession(read, write) as session:
                             await asyncio.wait_for(session.initialize(), timeout=effective_timeout)
                             resp = await asyncio.wait_for(
