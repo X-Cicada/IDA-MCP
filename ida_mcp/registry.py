@@ -356,10 +356,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):  # pragma: no cover
                     resp_size = 0
                 _debug_log('CALL_OK', tool=tool, target_port=port, elapsed_ms=dt_ms, resp_size=resp_size)
                 self._send(200, result)
-            except Exception as e:  # pragma: no cover
+            except BaseException as e:  # pragma: no cover  # BaseException to catch ExceptionGroup (Python 3.11+)
                 import traceback
                 dt_ms = int((time.time() - t0) * 1000)
-                err_detail = f"{type(e).__name__}: {e}"
+                # ExceptionGroup (from anyio TaskGroup) wraps real exceptions
+                if hasattr(e, 'exceptions'):
+                    sub_details = '; '.join(f"{type(se).__name__}: {se}" for se in e.exceptions)
+                    err_detail = f"{type(e).__name__}: [{sub_details}]"
+                else:
+                    err_detail = f"{type(e).__name__}: {e}"
                 
                 # 客户端断开连接时静默处理，不输出大量日志
                 is_disconnect = any(x in err_detail for x in [
