@@ -1,0 +1,4 @@
+interface:
+  display_name: "Router FS Vuln Audit"
+  short_description: "Router firmware filesystem and IDA vulnerability audit workflow"
+  default_prompt: "Audit exposed services in a router firmware filesystem, prioritize pre-auth RCE, auth bypass, and post-auth RCE, then produce a defensible report and minimal verification PoC."
