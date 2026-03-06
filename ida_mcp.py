@@ -251,14 +251,15 @@ def _find_free_port(preferred: int, host: str = "127.0.0.1", max_scan: int = 50)
     """
     for i in range(max_scan):
         p = preferred + i
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind((host, p))
-            except OSError:
-                continue
-            return p
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind((host, p))
+            return p, s  # 保持 socket 占用, 防止其他进程抢占
+        except OSError:
+            s.close()
+            continue
     _warn(f"Port scan exhausted; falling back to preferred {preferred}")
-    return preferred
+    return preferred, None
 
 
 def _register_with_coordinator(port: int):
@@ -344,7 +345,7 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
     comment = "FastMCP HTTP server for IDA"
     help = "Expose IDA features through Model Context Protocol"
     wanted_name = "IDA-MCP"
-    wanted_hotkey = ""
+    wanted_hotkey = "Ctrl-Shift-M"
 
     def init(self):  # type: ignore
         if idaapi is None:
@@ -399,12 +400,13 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
         # 端口选择: 优先使用环境变量; 否则自动扫描以支持多实例
         # 必须使用实际监听地址进行端口探测
         env_port = os.getenv("IDA_MCP_PORT")
+        hold_sock = None
         if env_port and env_port.isdigit():
             port = int(env_port)
         else:
-            port = _find_free_port(DEFAULT_PORT, host)
+            port, hold_sock = _find_free_port(DEFAULT_PORT, host)
         _info(f"Starting MCP server at http://{host}:{port}/mcp (toggle to stop)")
-        start_server_async(host, port)
+        start_server_async(host, port, hold_sock)
         # 在后台预构建字符串缓存，避免首次 list_strings 调用超时
         _warmup_caches()
 
@@ -413,16 +415,20 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
         if is_running():
             stop_server()
 
-def start_server_async(host: str, port: int):
+def start_server_async(host: str, port: int, hold_sock=None):
     """异步(线程)启动 uvicorn FastMCP 服务。
 
     设计要点:
         * 使用守护线程避免阻塞 IDA 主线程。
         * 通过保存 ``_uv_server`` 引用实现优雅关闭 (设置 should_exit)。
         * 线程启动后立即向协调器注册 (保持实例可发现性)。
+        * hold_sock: 端口占位 socket, 在 uvicorn 绑定前释放以最小化竞态窗口。
     """
     global _server_thread, _uv_server
     if is_running():
+        if hold_sock:
+            try: hold_sock.close()
+            except Exception: pass
         _info("Server already running; start request ignored.")
         return
 
@@ -430,6 +436,10 @@ def start_server_async(host: str, port: int):
 
     def worker():
         global _uv_server
+        # 释放端口占位 socket, 紧接着 uvicorn 绑定同一端口
+        if hold_sock:
+            try: hold_sock.close()
+            except Exception: pass
         try:
             # Windows 控制台噪音抑制: 使用 Selector 事件循环替代 Proactor，
             # 规避 asyncio 在 _ProactorBasePipeTransport._call_connection_lost 中

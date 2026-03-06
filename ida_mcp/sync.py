@@ -31,6 +31,17 @@ def _run_in_ida(fn: Callable[[], Any], write: bool = False) -> Any:
     
     def wrapper() -> int:
         try:
+            # 就绪检查: IDA 自动分析未完成时拒绝执行, 防止崩溃
+            try:
+                import ida_auto  # type: ignore
+                if not ida_auto.auto_is_ok():
+                    result_box["error"] = "IDA autoanalysis still in progress, please retry shortly"
+                    return 0
+            except (ImportError, AttributeError):
+                pass
+            # 命令日志: 在 IDA Output 窗口显示正在执行的 MCP 命令
+            if tool_name:
+                ida_kernwin.msg(f"[MCP] \u2192 {tool_name}\n")
             result_box["value"] = fn()
         except Exception as e:
             result_box["error"] = repr(e)
@@ -57,7 +68,7 @@ def idaread(fn: F) -> F:
     """
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return _run_in_ida(lambda: fn(*args, **kwargs), write=False)
+        return _run_in_ida(lambda: fn(*args, **kwargs), write=False, tool_name=fn.__name__)
     # Preserve the original function's signature for Pydantic/FastMCP
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore
     return wrapper  # type: ignore
@@ -75,7 +86,7 @@ def idawrite(fn: F) -> F:
     """
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return _run_in_ida(lambda: fn(*args, **kwargs), write=True)
+        return _run_in_ida(lambda: fn(*args, **kwargs), write=True, tool_name=fn.__name__)
     # Preserve the original function's signature for Pydantic/FastMCP
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore
     return wrapper  # type: ignore
