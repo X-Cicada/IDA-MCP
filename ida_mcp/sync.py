@@ -18,13 +18,34 @@ import ida_kernwin  # type: ignore
 
 F = TypeVar('F', bound=Callable[..., Any])
 
-def _run_in_ida(fn: Callable[[], Any], write: bool = False, tool_name: str | None = None) -> Any:
+_LOG_ARG_MAX = 80
+_LOG_LINE_MAX = 200
+
+def _fmt_tool_call(name: str, kwargs: dict) -> str:
+    """Format tool call for IDA Output: get_metadata(addr="0x1234", count=10)"""
+    if not kwargs:
+        return f"{name}()"
+    parts = []
+    for k, v in kwargs.items():
+        s = repr(v)
+        if len(s) > _LOG_ARG_MAX:
+            s = s[:_LOG_ARG_MAX] + "..."
+        parts.append(f"{k}={s}")
+    args_str = ", ".join(parts)
+    result = f"{name}({args_str})"
+    if len(result) > _LOG_LINE_MAX:
+        result = result[:_LOG_LINE_MAX] + "..."
+    return result
+
+
+def _run_in_ida(fn: Callable[[], Any], write: bool = False, tool_name: str | None = None, tool_kwargs: dict | None = None) -> Any:
     """在 IDA 主线程执行回调并返回结果。
     
     参数:
         fn: 要执行的回调函数
         write: True 使用 MFF_WRITE, False 使用 MFF_READ
         tool_name: 工具名称 (用于日志输出和就绪检查)
+        tool_kwargs: 工具关键字参数 (用于日志输出)
     
     返回:
         回调函数的返回值
@@ -46,7 +67,8 @@ def _run_in_ida(fn: Callable[[], Any], write: bool = False, tool_name: str | Non
                 pass
             # 命令日志: 在 IDA Output 窗口显示正在执行的 MCP 命令
             if tool_name:
-                ida_kernwin.msg(f"[MCP] \u2192 {tool_name}\n")
+                call_str = _fmt_tool_call(tool_name, tool_kwargs or {})
+                ida_kernwin.msg(f"[MCP] \u2192 {call_str}\n")
             result_box["value"] = fn()
         except Exception as e:
             result_box["error"] = repr(e)
@@ -73,7 +95,7 @@ def idaread(fn: F) -> F:
     """
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return _run_in_ida(lambda: fn(*args, **kwargs), write=False, tool_name=fn.__name__)
+        return _run_in_ida(lambda: fn(*args, **kwargs), write=False, tool_name=fn.__name__, tool_kwargs=kwargs)
     # Preserve the original function's signature for Pydantic/FastMCP
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore
     return wrapper  # type: ignore
@@ -91,7 +113,7 @@ def idawrite(fn: F) -> F:
     """
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return _run_in_ida(lambda: fn(*args, **kwargs), write=True, tool_name=fn.__name__)
+        return _run_in_ida(lambda: fn(*args, **kwargs), write=True, tool_name=fn.__name__, tool_kwargs=kwargs)
     # Preserve the original function's signature for Pydantic/FastMCP
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore
     return wrapper  # type: ignore

@@ -414,7 +414,7 @@ def start_server_async(host: str, port: int, hold_sock=None):
             _w.filterwarnings("ignore", category=DeprecationWarning, module=r"uvicorn")
             import uvicorn  # Local import to avoid overhead if never started
             # 使用 warning 日志级别并关闭 access log, 避免输出无意义的 CTRL+C 提示。
-            config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
+            config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False, timeout_keep_alive=86400)
             _uv_server = uvicorn.Server(config)
             # 不使用 uvicorn.Server.run()（其内部会创建/管理事件循环），
             # 我们在此线程内显式创建 loop 并安装异常处理器，以抑制

@@ -140,7 +140,7 @@ def start_http_proxy(host: str = "127.0.0.1", port: int = 11338, path: str = "/m
                 app = _SessionStickyMiddleware(app)
                 
                 import uvicorn
-                config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
+                config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False, timeout_keep_alive=86400)
                 _http_server = uvicorn.Server(config)
                 
                 import asyncio
