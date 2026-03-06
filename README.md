@@ -47,6 +47,10 @@ The project uses a modular architecture:
 * **Multi-instance Support**: Coordinator on port 11337 manages multiple IDA instances
 * **HTTP-first Defaults**: The bundled config defaults to `enable_http=true` and `enable_stdio=false`
 * **IDA 8.x/9.x Compatible**: Compatibility layer handles API differences
+* **Hotkey Toggle**: `Ctrl-Shift-M` to start/stop MCP server
+* **Command Logging**: All MCP tool calls displayed in IDA Output window with args
+* **Readiness Check**: Auto-rejects requests while IDA autoanalysis is running
+* **Long Session Support**: 24h keep-alive, safe to leave running all day
 
 ## Current Tools
 

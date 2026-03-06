@@ -41,7 +41,8 @@ def _run_in_ida(fn: Callable[[], Any], write: bool = False, tool_name: str | Non
                 pass
             # 命令日志: 在 IDA Output 窗口显示正在执行的 MCP 命令
             if tool_name:
-                ida_kernwin.msg(f"[MCP] \u2192 {tool_name}\n")
+                call_str = _fmt_tool_call(tool_name, tool_kwargs or {})
+                ida_kernwin.msg(f"[MCP] \u2192 {call_str}\n")
             result_box["value"] = fn()
         except Exception as e:
             result_box["error"] = repr(e)
@@ -68,7 +69,7 @@ def idaread(fn: F) -> F:
     """
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return _run_in_ida(lambda: fn(*args, **kwargs), write=False, tool_name=fn.__name__)
+        return _run_in_ida(lambda: fn(*args, **kwargs), write=False, tool_name=fn.__name__, tool_kwargs=kwargs)
     # Preserve the original function's signature for Pydantic/FastMCP
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore
     return wrapper  # type: ignore
@@ -86,7 +87,7 @@ def idawrite(fn: F) -> F:
     """
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return _run_in_ida(lambda: fn(*args, **kwargs), write=True, tool_name=fn.__name__)
+        return _run_in_ida(lambda: fn(*args, **kwargs), write=True, tool_name=fn.__name__, tool_kwargs=kwargs)
     # Preserve the original function's signature for Pydantic/FastMCP
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore
     return wrapper  # type: ignore
