@@ -313,7 +313,7 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
     comment = "FastMCP HTTP server for IDA"
     help = "Expose IDA features through Model Context Protocol"
     wanted_name = "IDA-MCP"
-    wanted_hotkey = "Ctrl-Shift-M"
+    wanted_hotkey = "Shift-Alt-M"
 
     def init(self):  # type: ignore
         if idaapi is None:

@@ -44,7 +44,7 @@ The project uses a modular architecture:
 * **MCP Resources**: REST-like `ida://` URI patterns for read-only data access
 * **Multi-instance Support**: Coordinator on port 11337 manages multiple IDA instances
 * **IDA 8.x/9.x Compatible**: Compatibility layer handles API differences
-* **Hotkey Toggle**: `Ctrl-Shift-M` to start/stop MCP server
+* **Hotkey Toggle**: `Shift-Alt-M` to start/stop MCP server
 * **Command Logging**: All MCP tool calls displayed in IDA Output window with args
 * **Readiness Check**: Auto-rejects requests while IDA autoanalysis is running
 * **Long Session Support**: 24h keep-alive, safe to leave running all day
@@ -186,11 +186,11 @@ IDA-MCP/
 
 1. Copy `ida_mcp.py` + `ida_mcp` folder to IDA's `plugins/`.
 2. Open target binary, wait for analysis to complete.
-3. Press `Ctrl-Shift-M` (or Edit → Plugins → IDA-MCP): First launch will:
+3. Press `Shift-Alt-M` (or Edit → Plugins → IDA-MCP): First launch will:
    * Select free port (starting from 10000) to run MCP service `http://127.0.0.1:<port>/mcp`
    * If 11337 is free → start coordinator; otherwise register with existing coordinator
    * All MCP tool calls are logged in IDA's Output window: `[MCP] → tool_name(args...)`
-4. Press `Ctrl-Shift-M` again = stop and unregister instance.
+4. Press `Shift-Alt-M` again = stop and unregister instance.
 
 > **Note**: The plugin automatically rejects MCP requests while IDA autoanalysis is still running, preventing crashes. Sessions stay alive for 24 hours — safe to leave running all day.
 
