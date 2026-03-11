@@ -318,3 +318,60 @@ def normalize_arch(raw: Optional[str], bits: int) -> Optional[str]:
     
     return raw
 
+
+# ============================================================================
+# Event-driven uvicorn Server (零空闲 CPU)
+# ============================================================================
+
+def create_event_driven_server(config: "uvicorn.Config") -> "uvicorn.Server":  # type: ignore
+    """创建事件驱动的 uvicorn Server，空闲时 CPU 占用为零。
+
+    原理:
+        uvicorn 原生 main_loop 硬编码 ``await asyncio.sleep(0.1)``，即使完全空闲
+        也会每秒唤醒 10 次。本函数返回的 Server 子类将 main_loop 替换为等待
+        ``asyncio.Event``，在没有 HTTP 请求时完全不消耗 CPU。
+
+        HTTP 请求处理走 asyncio 的 I/O 回调路径，不经过 main_loop，因此
+        请求延迟不受影响。
+
+    关闭方式:
+        调用 ``server.trigger_exit()``（线程安全），而非直接设置
+        ``server.should_exit = True``。trigger_exit 会通过
+        ``loop.call_soon_threadsafe`` 唤醒事件循环。
+
+    参数:
+        config: uvicorn.Config 实例
+
+    返回:
+        EventDrivenServer 实例
+    """
+    import asyncio
+    import uvicorn  # type: ignore
+
+    class _EventDrivenServer(uvicorn.Server):
+        """Zero-idle-CPU uvicorn server."""
+
+        def __init__(self, cfg: uvicorn.Config):
+            super().__init__(cfg)
+            self._exit_event: asyncio.Event | None = None
+            self._loop: asyncio.AbstractEventLoop | None = None
+
+        # -- 替换 main_loop: 纯等待，无轮询 ----------------------------------
+        async def main_loop(self) -> None:
+            self._loop = asyncio.get_running_loop()
+            self._exit_event = asyncio.Event()
+            await self._exit_event.wait()
+
+        # -- 线程安全的退出触发 -----------------------------------------------
+        def trigger_exit(self) -> None:
+            """从任意线程安全地请求服务器退出。"""
+            self.should_exit = True
+            if self._exit_event is not None and self._loop is not None:
+                try:
+                    self._loop.call_soon_threadsafe(self._exit_event.set)
+                except RuntimeError:
+                    # 事件循环已关闭
+                    pass
+
+    return _EventDrivenServer(config)
+

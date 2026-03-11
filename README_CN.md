@@ -53,7 +53,8 @@
 * **快捷键切换**：`Ctrl-Shift-M` 一键启动/停止 MCP 服务
 * **命令日志**：所有 MCP 工具调用实时显示在 IDA Output 窗口，含参数详情
 * **就绪检查**：IDA 自动分析未完成时自动拒绝请求，防止崩溃
-* **长会话支持**：24 小时 keep-alive，可安全挂一整天
+* **长会话支持**：24 小时 keep-alive，可安全挂一整天不断连
+* **零空闲 CPU**：事件驱动服务器替代 uvicorn 轮询 — 无请求时 CPU 占用为 0%
 
 ## 当前工具
 
@@ -379,6 +380,18 @@ python install.py
 * 交互式生成目标 `ida_mcp/config.conf`
 
 如果只想先验证发现结果和配置项，可运行 `python install.py --dry-run`。
+
+## 性能
+
+插件使用**事件驱动的 uvicorn 服务器**，彻底消除空闲时的 CPU 占用：
+
+| 组件 | 优化前 | 优化后 |
+|------|--------|--------|
+| IDA 实例服务器 | ~4% CPU（uvicorn 每 100ms 轮询） | **0% CPU**（asyncio.Event.wait） |
+| HTTP 代理服务器 | ~4% CPU（同样的轮询） | **0% CPU**（同样的修复） |
+| 协调器 | ~0.5% CPU（select 每 0.5s 轮询） | **≈0% CPU**（poll_interval=5s） |
+
+HTTP 请求延迟不受影响 — 请求通过 asyncio I/O 回调处理，不经过 main_loop。
 
 ## 依赖
 

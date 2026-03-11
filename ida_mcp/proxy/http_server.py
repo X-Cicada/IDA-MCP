@@ -129,7 +129,10 @@ def stop_http_proxy() -> None:
     with _stop_lock:
         if _http_server is not None:
             try:
-                _http_server.should_exit = True
+                if hasattr(_http_server, 'trigger_exit'):
+                    _http_server.trigger_exit()
+                else:
+                    _http_server.should_exit = True
             except Exception:
                 pass
 

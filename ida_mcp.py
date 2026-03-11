@@ -313,7 +313,10 @@ def stop_server():
             return
         try:
             # Graceful shutdown
-            _uv_server.should_exit = True  # type: ignore[attr-defined]
+            if hasattr(_uv_server, 'trigger_exit'):
+                _uv_server.trigger_exit()  # type: ignore[attr-defined]
+            else:
+                _uv_server.should_exit = True  # type: ignore[attr-defined]
             _info("Shutdown signal sent to uvicorn server.")
         except Exception as e:  # pragma: no cover
             _error(f"Failed to signal shutdown: {e}")
@@ -461,8 +464,9 @@ def start_server_async(host: str, port: int, hold_sock=None):
             _w.filterwarnings("ignore", category=DeprecationWarning, module=r"uvicorn")
             import uvicorn  # Local import to avoid overhead if never started
             # 使用 warning 日志级别并关闭 access log, 避免输出无意义的 CTRL+C 提示。
+            from ida_mcp.utils import create_event_driven_server
             config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False, timeout_keep_alive=86400)
-            _uv_server = uvicorn.Server(config)
+            _uv_server = create_event_driven_server(config)
             # 不使用 uvicorn.Server.run()（其内部会创建/管理事件循环），
             # 我们在此线程内显式创建 loop 并安装异常处理器，以抑制
             # Windows 下常见的 WinError 10054 “远程主机强迫关闭连接”噪音。

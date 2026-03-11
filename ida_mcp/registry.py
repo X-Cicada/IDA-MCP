@@ -405,7 +405,7 @@ def _start_coordinator():  # pragma: no cover
         try:
             # Use ThreadingHTTPServer to handle concurrent requests to different instances
             httpd = ThreadingHTTPServer((COORD_HOST, COORD_PORT), _Handler)
-            httpd.serve_forever()
+            httpd.serve_forever(poll_interval=5.0)
         except Exception:
             pass
     _server_thread = threading.Thread(target=run, name="IDA-MCP-Registry", daemon=True)

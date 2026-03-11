@@ -51,6 +51,7 @@ The project uses a modular architecture:
 * **Command Logging**: All MCP tool calls displayed in IDA Output window with args
 * **Readiness Check**: Auto-rejects requests while IDA autoanalysis is running
 * **Long Session Support**: 24h keep-alive, safe to leave running all day
+* **Zero Idle CPU**: Event-driven server replaces uvicorn polling — 0% CPU when no requests
 
 ## Current Tools
 
