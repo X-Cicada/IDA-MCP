@@ -22,7 +22,7 @@ except ImportError:
 
 F = TypeVar('F', bound=Callable[..., Any])
 
-def _run_in_ida(fn: Callable[[], Any], write: bool = False) -> Any:
+def _run_in_ida(fn: Callable[[], Any], write: bool = False, tool_name: str | None = None) -> Any:
     """在 IDA 主线程执行回调并返回结果。"""
     if ida_kernwin is None:
         raise RuntimeError("ida_kernwin not available (not running in IDA?)")

@@ -237,7 +237,7 @@ def _prime_path_caches():
             pass
 
 
-def _find_free_port(preferred: int, host: str = "127.0.0.1", max_scan: int = 50) -> int:
+def _find_free_port(preferred: int, host: str = "127.0.0.1", max_scan: int = 50) -> tuple:
     """端口扫描: 从 preferred 起向上尝试绑定, 返回第一个可用端口;
     若全部失败则返回 preferred (保底)。
     
@@ -361,11 +361,12 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
                 if not is_running():
                     host = os.getenv("IDA_MCP_HOST") or get_ida_host()
                     env_port = os.getenv("IDA_MCP_PORT")
+                    hold_sock = None
                     if env_port and env_port.isdigit():
                         port = int(env_port)
                     else:
-                        port = _find_free_port(DEFAULT_PORT, host)
-                    start_server_async(host, port)
+                        port, hold_sock = _find_free_port(DEFAULT_PORT, host)
+                    start_server_async(host, port, hold_sock)
             t = threading.Thread(target=_auto, daemon=True)
             t.start()
         else:
