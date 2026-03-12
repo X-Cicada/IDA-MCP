@@ -9,7 +9,7 @@
    - first_string - 获取第一个字符串信息
    - first_global - 获取第一个全局变量信息
    - metadata - 获取 IDB 元数据
-5. API 调用日志 - 保存到 api_logs/ 目录
+5. API 调用日志 - 保存到 .artifacts/api_logs/ 目录
    - stdio 模式: stdio_*.json
    - http 模式: http_*.json
 
@@ -25,6 +25,7 @@ import json
 import os
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional, Dict, List, Union
 
 
@@ -68,7 +69,7 @@ _api_call_logs: Dict[str, List[Dict[str, Any]]] = {
 }
 
 # 日志目录路径
-_LOG_DIR = os.path.join(os.path.dirname(__file__), "api_logs")
+_LOG_DIR = str(Path(__file__).resolve().parent.parent / ".artifacts" / "api_logs")
 
 # API 分类映射（与 IDA API 工具名一致）
 _API_CATEGORIES = {

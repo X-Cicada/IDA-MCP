@@ -137,32 +137,6 @@ def list_instances() -> List[dict]:
     except Exception as e:
         return [{"error": str(e)}]
 
-
-# ============================================================================
-# IDB 元数据
-# ============================================================================
-
-@tool
-@idawrite
-def close_ida(
-    save: Annotated[bool, "Whether to save IDB file before closing"] = True,
-) -> dict:
-    """Close IDA Pro instance. Warning: This terminates the process."""
-    try:
-        if save:
-            # Save to current IDB
-            # save_database(outfile, flags) -> bool
-            # passing None as outfile saves to current database
-            if not ida_loader.save_database(None, 0):
-                 return {"error": "Failed to save database"}
-        
-        # Exit
-        ida_pro.qexit(0)
-        return {"status": "ok", "message": "IDA is closing"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
 @tool
 @idaread
 def get_metadata() -> dict:

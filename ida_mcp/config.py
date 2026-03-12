@@ -28,6 +28,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict
 
+from .platform import win_to_wsl_path
+
 # 配置文件路径
 _CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_FILE = os.path.join(_CONFIG_DIR, "config.conf")
@@ -89,45 +91,39 @@ def _parse_value(value: str) -> Any:
     return value
 
 
+def parse_config_file(path: str) -> Dict[str, Any]:
+    """解析任意 config.conf 风格文件。"""
+    config: Dict[str, Any] = {}
+
+    if not os.path.exists(path):
+        return config
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+
+                key, value = line.split("=", 1)
+                if "#" in value:
+                    value = value.split("#", 1)[0]
+                config[key.strip()] = _parse_value(value)
+    except Exception:
+        return {}
+
+    return config
+
+
 def load_config(reload: bool = False) -> Dict[str, Any]:
-    """加载配置文件。
-    
-    参数:
-        reload: 是否强制重新加载
-    
-    返回:
-        配置字典
-    """
+    """加载配置文件。"""
     global _cached_config
-    
+
     if _cached_config is not None and not reload:
         return _cached_config
-    
+
     config = dict(_DEFAULT_CONFIG)
-    
-    if os.path.exists(_CONFIG_FILE):
-        try:
-            with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    # 跳过空行和注释
-                    if not line or line.startswith("#"):
-                        continue
-                    
-                    # 解析 key = value
-                    if "=" in line:
-                        key, value = line.split("=", 1)
-                        key = key.strip()
-                        
-                        # 去除行尾注释
-                        if "#" in value:
-                            value = value.split("#", 1)[0]
-                        
-                        value = _parse_value(value)
-                        config[key] = value
-        except Exception:
-            pass
-    
+    config.update(parse_config_file(_CONFIG_FILE))
     _cached_config = config
     return config
 
@@ -204,30 +200,6 @@ def get_ida_default_port() -> int:
     config = load_config()
     return int(config.get("ida_default_port", 10000))
 
-
-import subprocess
-
-def _win_to_wsl_path(path: str) -> str:
-    """Convert Windows path to WSL path if running in WSL."""
-    if not path:
-        return path
-    if not os.path.exists("/proc/version"):
-        return path
-        
-    try:
-        with open("/proc/version", "r") as f:
-            if "microsoft" not in f.read().lower():
-                return path
-    except Exception:
-        return path
-        
-    try:
-        # Convert Windows path to WSL path
-        result = subprocess.check_output(["wslpath", "-u", path], stderr=subprocess.DEVNULL)
-        return result.decode().strip()
-    except Exception:
-        return path
-
 def get_ida_path() -> str | None:
     """获取 IDA 可执行文件路径。
     
@@ -247,7 +219,7 @@ def get_ida_path() -> str | None:
         path = config.get("ida_path")
         
     if path:
-        return _win_to_wsl_path(path)
+        return win_to_wsl_path(path)
     return None
 
 

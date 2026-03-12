@@ -397,34 +397,6 @@ def _start_coordinator():  # pragma: no cover
             pass
     _server_thread = threading.Thread(target=run, name="IDA-MCP-Registry", daemon=True)
     _server_thread.start()
-    
-    # 根据配置启动 HTTP 代理
-    _try_start_http_proxy()
-
-
-def _try_start_http_proxy():  # pragma: no cover
-    """根据配置启动 HTTP MCP 代理。"""
-    try:
-        from .config import get_http_host, get_http_port, get_http_path, is_http_enabled
-        
-        # 检查是否启用 HTTP 模式
-        if not is_http_enabled():
-            return
-        
-        from .http import start_http_proxy, get_http_url
-        
-        host = get_http_host()
-        port = get_http_port()
-        path = get_http_path()
-        
-        if start_http_proxy(host, port, path):
-            url = get_http_url()
-            _log_info(f"HTTP MCP proxy started at {url}")
-        else:
-            _log_info("Failed to start HTTP MCP proxy")
-    except Exception as e:
-        # HTTP 模块不可用时静默忽略
-        _log_info(f"HTTP proxy not started: {e}")
 
 
 def _log_info(msg: str):  # pragma: no cover

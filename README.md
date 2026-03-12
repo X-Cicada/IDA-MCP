@@ -164,23 +164,16 @@ IDA-MCP/
     api_stack.py          # Stack frame API
     api_debug.py          # Debugger API (unsafe)
     api_python.py         # Python execution API (unsafe)
+    api_lifecycle.py      # Lifecycle API (shutdown/exit)
     api_resources.py      # MCP Resources
     registry.py           # Coordinator / multi-instance registration
     proxy/                # stdio-based MCP proxy
       __init__.py         # Proxy module exports
       ida_mcp_proxy.py    # Main entry point (stdio MCP server)
+      api_lifecycle.py    # Proxy lifecycle API implementation
       _http.py            # HTTP helpers for coordinator communication
       _state.py           # State management and port validation
-      proxy_core.py       # Core forwarding tools
-      proxy_analysis.py   # Analysis forwarding tools
-      proxy_memory.py     # Memory forwarding tools
-      proxy_types.py      # Type forwarding tools
-      proxy_modify.py     # Modification forwarding tools
-      proxy_stack.py      # Stack frame forwarding tools
-      proxy_debug.py      # Debug forwarding tools
-      proxy_python.py     # Python forwarding tools
-    http/                 # HTTP-based MCP proxy (auto-started, reuses stdio proxy)
-      __init__.py         # HTTP module exports
+      register_tools.py   # Consolidated forwarding tool registration
       http_server.py      # HTTP transport wrapper (reuses ida_mcp_proxy.server)
   mcp.json                # MCP client configuration (both modes)
   README.md               # README
@@ -199,7 +192,7 @@ IDA-MCP/
    * starts the HTTP proxy on `11338` only in the coordinator process, and only when HTTP proxying is enabled
 5. Trigger the plugin again to stop the instance server and deregister it.
 
-`open_in_ida` is a proxy-side lifecycle tool. It launches IDA with `IDA_MCP_AUTO_START=1` and injects `-A` unless you already passed it in `extra_args`. This reduces prompts, but it does not guarantee that every IDA/loader/plugin dialog is suppressed.
+`open_in_ida` is a proxy-side lifecycle tool. It launches the IDA binary resolved from `IDA_PATH` or `config.conf` (`ida_path`), sets `IDA_MCP_AUTO_START=1`, and injects `-A` unless you already passed it in `extra_args`. This reduces prompts, but it does not guarantee that every IDA/loader/plugin dialog is suppressed.
 
 ## Transport Overview
 
@@ -268,6 +261,7 @@ Notes:
 
 * The coordinator host and direct instance host are fixed to `127.0.0.1` in code.
 * `IDA_PATH` overrides `ida_path` from `config.conf`.
+* `open_in_ida` no longer accepts an `ida_path` tool argument; configure the IDA executable through `IDA_PATH` or `config.conf`.
 * If both `enable_stdio` and `enable_http` are disabled, the plugin will not start the coordinator/transport stack.
 
 ### Method 1: HTTP Proxy Mode (Recommended)

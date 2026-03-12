@@ -81,11 +81,13 @@ import time
 import idaapi  # type: ignore
 import ida_kernwin  # type: ignore
 
-from ida_mcp import create_mcp_server, DEFAULT_PORT, registry
+from ida_mcp import registry
 from ida_mcp.config import (
-    get_ida_host, get_coordinator_host, get_coordinator_port,
+    get_ida_default_port, get_ida_host, get_coordinator_host, get_coordinator_port,
     is_stdio_enabled, is_http_enabled
 )
+from ida_mcp.runtime import start_http_proxy_if_coordinator
+from ida_mcp.server_factory import create_mcp_server
 
 _server_thread: threading.Thread | None = None  # 后台 uvicorn 线程 (运行 FastMCP ASGI 服务)
 _uv_server = None  # type: ignore               # uvicorn.Server 实例引用, 用于优雅关闭 (should_exit)
@@ -99,6 +101,7 @@ _REGISTER_INTERVAL = 300                        # (可选) 原本用于周期 re
 _HEARTBEAT_INTERVAL = 60                        # 心跳循环唤醒/巡检间隔
 _cached_input_file: str | None = None           # 缓存的输入二进制路径 (仅主线程初始化; 心跳线程避免直接调用 IDA API)
 _cached_idb_path: str | None = None             # 缓存的 IDB 路径 (同上, 避免后台线程访问 IDA C 接口)
+DEFAULT_PORT = get_ida_default_port()
 
 
 def _warmup_caches():
@@ -273,7 +276,10 @@ def _register_with_coordinator(port: int):
     _prime_path_caches()
     try:
         registry.init_and_register(port, _cached_input_file, _cached_idb_path)
+        http_proxy_url = start_http_proxy_if_coordinator()
         _info(f"Registered instance at port={port} pid={os.getpid()} input='{_cached_input_file}' idb='{_cached_idb_path}'")
+        if http_proxy_url:
+            _info(f"HTTP MCP proxy started at {http_proxy_url}")
         # 若本实例成为协调器, 追加一条提示日志 (用户需求)
         try:
             if getattr(registry, 'is_coordinator', lambda: False)():  # type: ignore[attr-defined]

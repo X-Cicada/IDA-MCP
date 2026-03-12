@@ -15,7 +15,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from ida_mcp.proxy.proxy_lifecycle import _wsl_to_win_path
+from ida_mcp.platform import wsl_to_win_path
+from ida_mcp.proxy import api_lifecycle
 
 pytestmark = pytest.mark.lifecycle
 
@@ -75,63 +76,38 @@ class TestLifecycleErrors:
         """测试打开不存在的文件。"""
         result = tool_caller("open_in_ida", {"file_path": "non_existent_file.exe"})
         assert "error" in result
-        # Since we fixed proxy_lifecycle.py, we expect a proper error message, not 500
         assert "not found" in result["error"] or "File not found" in result["error"]
 
 
     def test_open_in_ida_no_config(self, tool_caller):
         """测试未配置 IDA 路径的情况（模拟）。"""
-        # 我们尝试传递一个不存在的 ida_path 来触发错误
-        result = tool_caller("open_in_ida", {
-            "file_path": __file__,  # 使用当前文件作为目标
-            "ida_path": "Z:/non_existent/ida.exe"
-        })
+        with patch("ida_mcp.proxy.api_lifecycle.get_ida_path", return_value=None):
+            result = api_lifecycle.open_in_ida(__file__)
         assert "error" in result
-        assert "not found" in result["error"] or "executable" in result["error"] or "Failed to launch" in result["error"]
+        assert "not configured" in result["error"]
 
     def test_open_in_ida_tool_exists(self, tool_caller):
         """验证 open_in_ida 工具已注册。"""
-        result = tool_caller("open_in_ida", {"file_path": "invalid", "ida_path": "invalid"})
+        result = tool_caller("open_in_ida", {"file_path": "invalid"})
         assert "error" in result
-        assert "not found" in result["error"] or "executable" in result["error"] or "Failed to launch" in result["error"]
+        assert "not found" in result["error"] or "not configured" in result["error"] or "Failed to launch" in result["error"]
 
 
     def test_wsl_path_conversion(self):
         """测试 WSL 路径转换逻辑 (单元测试)。"""
-        
-        # Mock os.path.exists 和 open 来模拟 WSL 环境
-        with patch("os.path.exists") as mock_exists:
-            # 需要正确处理多次调用 os.path.exists
-            # 第一次检查 /proc/version (True)，第二次检查 /proc/version (True)
-            def side_effect(path):
-                if path == "/proc/version":
-                    return True
-                return False
-            mock_exists.side_effect = side_effect
-            
-            with patch("builtins.open", new_callable=MagicMock) as mock_open:
-                # 模拟读取 /proc/version 内容
-                mock_file = MagicMock()
-                mock_file.read.return_value = "Linux version ... Microsoft ..."
-                mock_open.return_value.__enter__.return_value = mock_file
-                
-                # Mock subprocess.check_output
-                with patch("subprocess.check_output") as mock_sub:
-                    mock_sub.return_value = b"C:\\test\n"
-                    
-                    # 测试转换
-                    result = _wsl_to_win_path("/mnt/c/test")
-                    assert result == "C:\\test"
-                    
-                    # 验证调用参数
-                    mock_sub.assert_called_with(["wslpath", "-w", "/mnt/c/test"], stderr=subprocess.DEVNULL)
+
+        with patch("ida_mcp.platform.is_wsl", return_value=True):
+            with patch("subprocess.check_output") as mock_sub:
+                mock_sub.return_value = b"C:\\test\n"
+
+                result = wsl_to_win_path("/mnt/c/test")
+                assert result == "C:\\test"
+                mock_sub.assert_called_with(["wslpath", "-w", "/mnt/c/test"], stderr=subprocess.DEVNULL)
 
     def test_wsl_path_conversion_non_wsl(self):
         """测试非 WSL 环境下的路径转换 (单元测试)。"""
-        with patch("os.path.exists") as mock_exists:
-            # 模拟 /proc/version 不存在
-            mock_exists.return_value = False
-            assert _wsl_to_win_path("/home/user/test") == "/home/user/test"
+        with patch("ida_mcp.platform.is_wsl", return_value=False):
+            assert wsl_to_win_path("/home/user/test") == "/home/user/test"
 
 
 class TestLifecycleClose:

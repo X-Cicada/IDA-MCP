@@ -7,16 +7,12 @@
 proxy/
 ├── __init__.py           # 模块导出
 ├── _server.py            # 共享的 FastMCP server (stdio/HTTP 复用)
+├── api_lifecycle.py      # 生命周期 API 实现
+├── register_tools.py     # 集中注册所有转发工具
 ├── ida_mcp_proxy.py      # stdio 传输入口 (本文件)
 ├── _http.py              # HTTP 辅助函数
 ├── _state.py             # 状态管理和实例选择
-├── proxy_core.py         # 核心工具: list_functions, metadata, strings
-├── proxy_analysis.py     # 分析工具: decompile, disasm, xrefs
-├── proxy_modify.py       # 修改工具: comment, rename
-├── proxy_memory.py       # 内存工具: read_bytes, read_string
-├── proxy_types.py        # 类型工具: set_func_type, declare_type
-├── proxy_debug.py        # 调试工具: dbg_*
-└── proxy_stack.py        # 栈帧工具: stack_frame
+└── http_server.py        # HTTP 传输入口
 
 使用方式
 ====================
@@ -25,17 +21,17 @@ proxy/
 """
 from __future__ import annotations
 
+import pathlib
 import sys
-import os
 from typing import Any
 
-# 支持直接运行和作为包导入两种方式
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-if _this_dir not in sys.path:
-    sys.path.insert(0, _this_dir)
-
-# 导入共享的 server 实例（包含所有工具定义）
-from _server import server  # type: ignore
+if __package__ in {None, ""}:
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from ida_mcp.proxy._server import server
+else:
+    from ._server import server
 
 
 # ============================================================================

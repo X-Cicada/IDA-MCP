@@ -3,13 +3,7 @@ from __future__ import annotations
 
 from typing import Optional, Any, List
 
-import sys
-import os
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-if _this_dir not in sys.path:
-    sys.path.insert(0, _this_dir)
-
-from _http import http_get, http_post  # type: ignore
+from ._http import http_get, http_post
 
 # 当前选中的端口
 _current_port: Optional[int] = None

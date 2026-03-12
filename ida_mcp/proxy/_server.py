@@ -7,8 +7,6 @@ ida_mcp_proxy.py 和 http_server.py 都应该导入此模块的 server。
 """
 from __future__ import annotations
 
-import sys
-import os
 from typing import Optional, Annotated, Any
 
 try:
@@ -18,30 +16,14 @@ except ImportError:
 
 from fastmcp import FastMCP
 
-# 确保当前目录在路径中
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-if _this_dir not in sys.path:
-    sys.path.insert(0, _this_dir)
-
-# 导入辅助模块
-from _http import http_get, http_post  # type: ignore
-from _state import (  # type: ignore
+from ._http import http_get, http_post
+from ._state import (
     get_instances,
     is_valid_port,
     get_current_port,
     set_current_port,
 )
-
-# 导入工具注册函数
-import proxy_core  # type: ignore
-import proxy_analysis  # type: ignore
-import proxy_modify  # type: ignore
-import proxy_memory  # type: ignore
-import proxy_types  # type: ignore
-import proxy_debug  # type: ignore
-import proxy_python  # type: ignore
-import proxy_stack  # type: ignore
-import proxy_lifecycle  # type: ignore
+from . import register_tools
 
 
 # ============================================================================
@@ -133,13 +115,5 @@ def select_instance(
 # 注册分类工具
 # ============================================================================
 
-proxy_core.register_tools(server)
-proxy_analysis.register_tools(server)
-proxy_modify.register_tools(server)
-proxy_memory.register_tools(server)
-proxy_types.register_tools(server)
-proxy_debug.register_tools(server)
-proxy_python.register_tools(server)
-proxy_stack.register_tools(server)
-proxy_lifecycle.register_tools(server)
+register_tools.register_tools(server)
 

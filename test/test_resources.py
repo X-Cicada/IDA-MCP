@@ -3,7 +3,7 @@
 测试逻辑：
 1. 通过 FastMCP 客户端访问各种 ida:// URI 资源
 2. 验证资源返回格式
-3. 记录测试结果到 api_logs/ 目录
+3. 记录测试结果到 .artifacts/api_logs/ 目录
    - stdio 模式: stdio_uri.json
    - http 模式: http_uri.json
 
@@ -24,6 +24,7 @@ import json
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 pytestmark = pytest.mark.resources
@@ -41,7 +42,7 @@ HTTP_PROXY_PORT = 11338
 HTTP_PROXY_PATH = "/mcp"
 
 # 日志目录
-_LOG_DIR = os.path.join(os.path.dirname(__file__), "api_logs")
+_LOG_DIR = str(Path(__file__).resolve().parent.parent / ".artifacts" / "api_logs")
 
 # URI 调用日志 (按传输模式分开)
 _uri_call_logs: Dict[str, List[Dict[str, Any]]] = {

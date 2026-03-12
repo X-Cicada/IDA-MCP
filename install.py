@@ -12,6 +12,8 @@ from glob import glob
 from pathlib import Path
 from typing import Iterable
 
+from ida_mcp.config import parse_config_file
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 SOURCE_PLUGIN_FILE = REPO_ROOT / "ida_mcp.py"
@@ -28,36 +30,6 @@ def detect_platform() -> str:
     if sys.platform.startswith("linux"):
         return "linux"
     raise RuntimeError(f"Unsupported platform: {sys.platform}")
-
-
-def parse_simple_config(path: Path) -> dict[str, object]:
-    config: dict[str, object] = {}
-    if not path.exists():
-        return config
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        value = value.split("#", 1)[0].strip()
-        if not value:
-            continue
-        if (value.startswith('"') and value.endswith('"')) or (
-            value.startswith("'") and value.endswith("'")
-        ):
-            config[key.strip()] = value[1:-1]
-            continue
-        lowered = value.lower()
-        if lowered in {"true", "false"}:
-            config[key.strip()] = lowered == "true"
-            continue
-        try:
-            config[key.strip()] = int(value)
-            continue
-        except ValueError:
-            pass
-        config[key.strip()] = value
-    return config
 
 
 def unique_existing_paths(paths: Iterable[Path]) -> list[Path]:
@@ -482,7 +454,7 @@ def main() -> int:
 
     validate_repo_layout()
     platform_name = detect_platform()
-    defaults = parse_simple_config(SOURCE_CONFIG)
+    defaults = parse_config_file(str(SOURCE_CONFIG))
 
     print(f"Detected platform: {platform_name}")
     ida_executable = choose_path(

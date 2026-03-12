@@ -2,19 +2,12 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
 import urllib.request
 from typing import Any
 
-# 添加父目录以导入配置模块
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _parent_dir not in sys.path:
-    sys.path.insert(0, _parent_dir)
-
 # 从配置文件加载，若失败则使用默认值
 try:
-    from config import get_coordinator_url, get_request_timeout
+    from ..config import get_coordinator_url, get_request_timeout
     COORD_URL = get_coordinator_url()
     REQUEST_TIMEOUT = get_request_timeout()
 except Exception:
