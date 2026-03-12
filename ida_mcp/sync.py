@@ -22,7 +22,33 @@ except ImportError:
 
 F = TypeVar('F', bound=Callable[..., Any])
 
-def _run_in_ida(fn: Callable[[], Any], write: bool = False, tool_name: str | None = None) -> Any:
+_LOG_ARG_MAX = 80
+_LOG_LINE_MAX = 200
+
+
+def _fmt_tool_call(name: str, kwargs: dict) -> str:
+    """Format tool call for IDA Output: get_metadata(addr="0x1234", count=10)"""
+    if not kwargs:
+        return f"{name}()"
+    parts = []
+    for k, v in kwargs.items():
+        s = repr(v)
+        if len(s) > _LOG_ARG_MAX:
+            s = s[:_LOG_ARG_MAX] + "..."
+        parts.append(f"{k}={s}")
+    args_str = ", ".join(parts)
+    result = f"{name}({args_str})"
+    if len(result) > _LOG_LINE_MAX:
+        result = result[:_LOG_LINE_MAX] + "..."
+    return result
+
+
+def _run_in_ida(
+    fn: Callable[[], Any],
+    write: bool = False,
+    tool_name: str | None = None,
+    tool_kwargs: dict | None = None,
+) -> Any:
     """在 IDA 主线程执行回调并返回结果。"""
     if ida_kernwin is None:
         raise RuntimeError("ida_kernwin not available (not running in IDA?)")
