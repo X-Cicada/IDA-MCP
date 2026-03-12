@@ -70,13 +70,25 @@ def start_http_proxy(host: str = "127.0.0.1", port: int = 11338, path: str = "/m
                     except Exception:
                         pass
 
-                app = _SessionStickyMiddleware(server.http_app(path=path))
-
                 import asyncio
                 import uvicorn
+                from ida_mcp.utils import (
+                    create_event_driven_server,
+                    get_streamable_http_session_manager,
+                    StreamableHTTPSessionCleanupMiddleware,
+                )
 
-                config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
-                _http_server = uvicorn.Server(config)
+                app = server.http_app(path=path)
+                session_manager = get_streamable_http_session_manager(app)
+                if session_manager is not None and hasattr(app, "add_middleware"):
+                    app.add_middleware(
+                        StreamableHTTPSessionCleanupMiddleware,
+                        session_manager=session_manager,
+                    )
+                app = _SessionStickyMiddleware(app)
+
+                config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False, timeout_keep_alive=86400)
+                _http_server = create_event_driven_server(config)
 
                 def _exception_handler(loop, context):
                     exc = context.get("exception")

@@ -348,7 +348,7 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
     comment = "FastMCP HTTP server for IDA"
     help = "Expose IDA features through Model Context Protocol"
     wanted_name = "IDA-MCP"
-    wanted_hotkey = "Ctrl-Shift-M"
+    wanted_hotkey = "Shift-Alt-M"
 
     def init(self):  # type: ignore
         if idaapi is None:
@@ -464,7 +464,17 @@ def start_server_async(host: str, port: int, hold_sock=None):
             _w.filterwarnings("ignore", category=DeprecationWarning, module=r"uvicorn")
             import uvicorn  # Local import to avoid overhead if never started
             # 使用 warning 日志级别并关闭 access log, 避免输出无意义的 CTRL+C 提示。
-            from ida_mcp.utils import create_event_driven_server
+            from ida_mcp.utils import (
+                create_event_driven_server,
+                get_streamable_http_session_manager,
+                StreamableHTTPSessionCleanupMiddleware,
+            )
+            session_manager = get_streamable_http_session_manager(app)
+            if session_manager is not None and hasattr(app, "add_middleware"):
+                app.add_middleware(
+                    StreamableHTTPSessionCleanupMiddleware,
+                    session_manager=session_manager,
+                )
             config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False, timeout_keep_alive=86400)
             _uv_server = create_event_driven_server(config)
             # 不使用 uvicorn.Server.run()（其内部会创建/管理事件循环），

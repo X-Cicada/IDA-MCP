@@ -375,3 +375,47 @@ def create_event_driven_server(config: "uvicorn.Config") -> "uvicorn.Server":  #
 
     return _EventDrivenServer(config)
 
+
+def get_streamable_http_session_manager(app: Any) -> Any:
+    """Best-effort lookup of FastMCP's StreamableHTTP session manager from a Starlette app."""
+    for route in getattr(app, "routes", []) or []:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is not None and hasattr(endpoint, "session_manager"):
+            return endpoint.session_manager
+
+        route_app = getattr(route, "app", None)
+        if route_app is not None and hasattr(route_app, "session_manager"):
+            return route_app.session_manager
+
+    return None
+
+
+def prune_terminated_streamable_http_sessions(session_manager: Any) -> int:
+    """Remove terminated FastMCP StreamableHTTP sessions that the SDK leaves in its mapping."""
+    instances = getattr(session_manager, "_server_instances", None)
+    if not isinstance(instances, dict):
+        return 0
+
+    removed = 0
+    for session_id, transport in list(instances.items()):
+        if getattr(transport, "is_terminated", False):
+            instances.pop(session_id, None)
+            removed += 1
+
+    return removed
+
+
+class StreamableHTTPSessionCleanupMiddleware:
+    """Prune terminated FastMCP sessions after each HTTP request."""
+
+    def __init__(self, app: Any, session_manager: Any = None):
+        self.app = app
+        self._session_manager = session_manager
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if scope.get("type") == "http":
+                prune_terminated_streamable_http_sessions(self._session_manager)
+

@@ -138,9 +138,8 @@ def list_instances() -> List[dict]:
     except Exception as e:
         return [{"error": str(e)}]
 
-@tool
 @idaread
-def get_metadata() -> dict:
+def _get_metadata_ida() -> dict:
     """Get IDB metadata (input_file, arch, bits, endian, hash)."""
 
     # 获取输入文件
