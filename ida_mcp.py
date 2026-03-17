@@ -1,4 +1,4 @@
-"""IDA Pro MCP 插件 (HTTP + 多实例协调器注册)
+"""IDA Pro MCP 插件 (HTTP + 多实例网关注册)
 
 功能综述
 ====================
@@ -7,31 +7,31 @@
 核心特性:
     1. 启动/关闭采用"切换式"触发(再次运行插件即关闭)。
     2. 自动选择空闲端口 (从 10000 开始向上扫描), MCP 路径固定为 ``/mcp``。
-    3. 首个成功启动的实例会在 ``127.0.0.1:11337`` 上创建一个 **内存型协调器(coordinator)**。
-    4. 后续实例向协调器注册, 仅在内存维护实例列表, 不落盘 (避免文件锁 / 清理问题)。
+    3. 插件会确保独立单端口网关已启动, 默认通过 ``127.0.0.1:11338/internal`` 完成注册与转发。
+    4. 后续实例向网关注册, 仅在内存维护实例列表, 不落盘 (避免文件锁 / 清理问题)。
     5. 工具最小化: 仅保留 ``list_functions`` 与 ``instances`` (实例列表)。
     6. 可配合独立进程型代理 ``ida_mcp_proxy.py`` 统一访问多个实例。
 
 运行时架构
 --------------------
-``IDA 实例 (N 个)`` → 各自运行 uvicorn FastMCP (HTTP) → 向协调器登记元信息(pid, port, input_file 等)。
-``协调器`` 负责: 记录活跃实例; 接收代理或其他客户端的 /call 请求并转发至目标实例。
+``IDA 实例 (N 个)`` → 各自运行 uvicorn FastMCP (HTTP) → 向网关登记元信息(pid, port, input_file 等)。
+``网关`` 负责: 记录活跃实例; 暴露统一 MCP 入口; 将 /call 请求转发至目标实例。
 
 线程与生命周期
 --------------------
 * uvicorn 服务器在 **后台守护线程** 中运行, 便于主线程继续响应 IDA 事件。
-* 关闭流程: 设置 ``_uv_server.should_exit = True`` → 等待线程退出 → 调用协调器注销。
+* 关闭流程: 设置 ``_uv_server.should_exit = True`` → 等待线程退出 → 调用网关注销。
 * IDA 退出或插件终止时, 若仍在运行则自动停止并反注册。
 
 端口选择策略
 --------------------
-* 若设置环境变量 ``IDA_MCP_PORT`` 且合法, 则使用该端口 (不再扫描)。
+* 若设置环境变量 ``IDA_MCP_PORT`` 且合法, 则将其作为优先起点; 若已占用则继续向上扫描。
 * 否则从 ``DEFAULT_PORT (=10000)`` 起向上扫描 (最大 50 次)。
 * 允许多个 IDA 实例并行, 避免端口冲突。
 
 环境变量 (可选)
 --------------------
-* ``IDA_MCP_PORT``: 指定固定端口。
+* ``IDA_MCP_PORT``: 指定优先端口起点。
 * ``IDA_MCP_HOST``: 监听地址, 默认 ``127.0.0.1``。
 * ``IDA_MCP_NAME``: MCP 服务名, 默认 ``IDA-MCP``。
 
@@ -45,19 +45,19 @@
 公共函数概览
 --------------------
 * ``start_server_async(host, port)``: 启动 MCP 服务器 (线程)。
-* ``stop_server()``: 发送退出信号并等待线程结束, 注销协调器。
+* ``stop_server()``: 发送退出信号并等待线程结束, 向网关注销。
 * ``is_running()``: 判断当前服务器线程是否存活。
 
 扩展建议
 --------------------
-未来可在 ``ida_mcp/server.py`` 内增量添加更多工具 (反编译、交叉引用、数据段搜索等)。协调器 ``registry.py`` 已支持 /call 转发, 添加工具仅需在每个实例服务端注册, 代理端(可选)补一层转发包装。
+未来可在 ``ida_mcp/server.py`` 内增量添加更多工具 (反编译、交叉引用、数据段搜索等)。网关 ``registry.py`` 已支持 /call 转发, 添加工具仅需在每个实例服务端注册, 代理端(可选)补一层转发包装。
 
 使用方式
 --------------------
 1. 将本文件与 ``ida_mcp`` 目录复制到 IDA ``plugins/``。
 2. 打开目标二进制, 分析完成后在菜单或快捷键中执行插件 (第一次执行 = 启动)。
 3. 再次执行插件 = 停止并反注册。
-4. 可启动多个 IDA 实例重复步骤 2, 通过协调器配合代理统一访问。
+4. 可启动多个 IDA 实例重复步骤 2, 通过网关统一访问。
 
 调试提示
 --------------------
@@ -83,14 +83,24 @@ import ida_kernwin  # type: ignore
 
 from ida_mcp import registry
 from ida_mcp.config import (
-    get_ida_default_port, get_ida_host, get_coordinator_host, get_coordinator_port,
-    is_stdio_enabled, is_http_enabled
+    get_coordinator_host,
+    get_coordinator_port,
+    get_http_bind_host,
+    get_http_path,
+    get_http_port,
+    get_ida_default_port,
+    get_ida_host,
+    is_stdio_enabled,
+    is_http_enabled,
+    is_unsafe_enabled,
 )
 from ida_mcp.runtime import start_http_proxy_if_coordinator
 from ida_mcp.server_factory import create_mcp_server
 
 _server_thread: threading.Thread | None = None  # 后台 uvicorn 线程 (运行 FastMCP ASGI 服务)
 _uv_server = None  # type: ignore               # uvicorn.Server 实例引用, 用于优雅关闭 (should_exit)
+_startup_thread: threading.Thread | None = None  # 启动预检线程 (先确认 gateway 健康, 再启动实例 listener)
+_startup_stop = threading.Event()                # 启动预检取消信号 (stop_server 中置位)
 _stop_lock = threading.Lock()                   # 防止 stop_server 并发重入的互斥锁
 _active_port: int | None = None                 # 当前实例实际监听的 MCP 端口 (启动后写入, 停止时清空)
 _hb_thread: threading.Thread | None = None      # 心跳/保活线程对象 (负责检测协调器状态与定期刷新注册)
@@ -99,9 +109,82 @@ _last_register_ts: float | None = None          # 最近一次成功调用 regis
 _ENABLE_PERIODIC_REFRESH = False                # 设为 True 才会启用“超时周期刷新”逻辑，默认只在缺失时重注册
 _REGISTER_INTERVAL = 300                        # (可选) 原本用于周期 refresh 的阈值; 默认禁用
 _HEARTBEAT_INTERVAL = 60                        # 心跳循环唤醒/巡检间隔
+_HEARTBEAT_WARN_INTERVAL = 300                  # 心跳连续失败时，重复告警的最小间隔
 _cached_input_file: str | None = None           # 缓存的输入二进制路径 (仅主线程初始化; 心跳线程避免直接调用 IDA API)
 _cached_idb_path: str | None = None             # 缓存的 IDB 路径 (同上, 避免后台线程访问 IDA C 接口)
+_hb_failure_count = 0                           # 连续 heartbeat 重注册失败次数
+_hb_last_failure_sig: str | None = None         # 最近一次 heartbeat 失败签名
+_hb_last_warn_ts = 0.0                          # 最近一次 heartbeat 告警时间
 DEFAULT_PORT = get_ida_default_port()
+
+
+def _wait_for_server_start(ready_event: threading.Event, server_obj) -> None:
+    """等待 uvicorn 将 started 标志置为 True。"""
+    try:
+        for _ in range(100):
+            if getattr(server_obj, "started", False):
+                ready_event.set()
+                return
+            if getattr(server_obj, "should_exit", False):
+                return
+            time.sleep(0.05)
+    except Exception:
+        return
+
+
+def _port_is_listening(host: str, port: int, timeout: float = 0.2) -> bool:
+    """Check whether the MCP HTTP listener is already accepting TCP connections."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _complete_startup_in_background(
+    host: str,
+    port: int,
+    server_ready: threading.Event,
+    server_failed: threading.Event,
+) -> None:
+    """Finish registration after the HTTP listener is ready without blocking the UI thread."""
+    start_ts = time.monotonic()
+    warned_slow = False
+    while True:
+        if _uv_server is not None and getattr(_uv_server, "should_exit", False):
+            return
+        if server_ready.is_set() or _port_is_listening(host, port):
+            break
+        if server_failed.is_set() or not (_server_thread and _server_thread.is_alive()):
+            _error(f"Server failed before bind on {host}:{port}")
+            return
+        if not warned_slow and (time.monotonic() - start_ts) >= 5.0:
+            warned_slow = True
+            _warn(f"Server startup is taking longer than expected on {host}:{port}; registration continues in background.")
+        time.sleep(0.1)
+
+    # Only mark the instance as active after gateway registration succeeds.
+    global _active_port
+    if _active_port == port:
+        return
+    if _uv_server is not None and getattr(_uv_server, "should_exit", False):
+        return
+    _info(
+        f"Instance MCP listener is ready at http://{host}:{port}/mcp/; "
+        "registering with gateway."
+    )
+    if not _register_with_coordinator(port):
+        _warn(f"Instance MCP server is listening on {host}:{port}, but gateway registration is incomplete.")
+        return
+    _active_port = port
+    # 记录注册时间并启动心跳线程
+    global _hb_thread, _last_register_ts
+    _last_register_ts = time.time()
+    if _hb_thread is None or not _hb_thread.is_alive():
+        _hb_stop.clear()
+        _hb_thread = threading.Thread(target=_heartbeat_loop, name="IDA-MCP-Heartbeat", daemon=True)
+        _hb_thread.start()
+        _info("Heartbeat thread started.")
 
 
 def _warmup_caches():
@@ -174,12 +257,13 @@ def _heartbeat_loop():
                 # 仅用缓存的路径/文件, 避免后台线程再触碰 IDA API
                 registry.init_and_register(_active_port, _cached_input_file, _cached_idb_path)
                 _last_register_ts = now
+                _reset_heartbeat_failure_tracking(log_recovery=True)
                 if inst_list:
                     _info("Heartbeat re-register (periodic refresh) done.") if _ENABLE_PERIODIC_REFRESH else None
                 else:
-                    _info("Heartbeat re-register successful (coordinator rebuilt or entry missing).")
+                    _info("Heartbeat re-register successful (gateway rebuilt or entry missing).")
             except Exception as e:  # pragma: no cover
-                _warn(f"Heartbeat re-register failed: {e}")
+                _report_heartbeat_failure(str(e))
         _hb_stop.wait(_HEARTBEAT_INTERVAL)
     _info("Heartbeat thread exit.")
 
@@ -200,6 +284,60 @@ def _warn(msg: str):
 
 def _error(msg: str):
     _log("ERROR", msg)
+
+
+def _gateway_diagnostics_text() -> str:
+    """Summarize gateway launch diagnostics for IDA main-log output."""
+    status_getter = getattr(registry, "get_registry_server_status", None)
+    if not callable(status_getter):
+        return ""
+    try:
+        status = status_getter() or {}
+    except Exception:
+        return ""
+
+    parts = []
+    if status.get("python"):
+        parts.append(f"python={status['python']}")
+    if status.get("log"):
+        parts.append(f"log={status['log']}")
+    if status.get("last_error"):
+        parts.append(f"last_error={status['last_error']}")
+    return ", ".join(parts)
+
+
+def _report_heartbeat_failure(error_text: str) -> None:
+    """Throttle repeated heartbeat registration failures in the main log."""
+    global _hb_failure_count, _hb_last_failure_sig, _hb_last_warn_ts
+
+    now = time.time()
+    repeated = error_text == _hb_last_failure_sig
+    _hb_failure_count += 1
+    should_warn = (
+        _hb_failure_count == 1
+        or not repeated
+        or (now - _hb_last_warn_ts) >= _HEARTBEAT_WARN_INTERVAL
+    )
+    if not should_warn:
+        return
+
+    suppressed = _hb_failure_count - 1
+    prefix = "Heartbeat re-register failed"
+    if suppressed > 0:
+        prefix += f" ({suppressed} similar failure(s) suppressed)"
+    _warn(f"{prefix}: {error_text}")
+    _hb_last_failure_sig = error_text
+    _hb_last_warn_ts = now
+
+
+def _reset_heartbeat_failure_tracking(log_recovery: bool = False) -> None:
+    """Clear heartbeat failure throttling state after success or shutdown."""
+    global _hb_failure_count, _hb_last_failure_sig, _hb_last_warn_ts
+    if log_recovery and _hb_failure_count > 0:
+        _info(f"Heartbeat re-register recovered after {_hb_failure_count} consecutive failure(s).")
+    _hb_failure_count = 0
+    _hb_last_failure_sig = None
+    _hb_last_warn_ts = 0.0
 
 
 def _prime_path_caches():
@@ -237,63 +375,104 @@ def _prime_path_caches():
             pass
 
 
-def _find_free_port(preferred: int, host: str = "127.0.0.1", max_scan: int = 50) -> tuple:
-    """端口扫描: 从 preferred 起向上尝试绑定, 返回第一个可用端口;
-    若全部失败则返回 preferred (保底)。
-    
-    参数:
-        preferred: 起始端口号
-        host: 要绑定的地址（必须与实际监听地址一致）
-        max_scan: 最大扫描次数
-    
-    注意: 默认端口选择 9000 以避开 Windows Hyper-V 保留端口范围 (8709-8808)。
-    不使用 SO_REUSEADDR, 因为在 Windows 上它的行为类似 SO_REUSEPORT。
+def _find_free_port(preferred: int, host: str = "127.0.0.1", max_scan: int = 50) -> tuple[int, socket.socket | None]:
+    """????: ? preferred ???????, ?? (port, hold_socket)?
+
+    hold_socket ???????????????, ???? IDA ?????????????
+    ?????? uvicorn ????? hold_socket?
+    ???????? (preferred, None)?
     """
     for i in range(max_scan):
         p = preferred + i
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        hold_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            s.bind((host, p))
-            return p, s  # 保持 socket 占用, 防止其他进程抢占
+            hold_sock.bind((host, p))
+            return p, hold_sock
         except OSError:
-            s.close()
+            hold_sock.close()
             continue
     _warn(f"Port scan exhausted; falling back to preferred {preferred}")
     return preferred, None
 
 
-def _register_with_coordinator(port: int):
+def _select_start_port(host: str) -> tuple[int, socket.socket | None]:
+    """Select a bindable MCP port, treating IDA_MCP_PORT as a preferred starting point."""
+    env_port = os.getenv("IDA_MCP_PORT")
+    if env_port and env_port.isdigit():
+        return _find_free_port(int(env_port), host)
+    return _find_free_port(DEFAULT_PORT, host)
+
+
+def _ensure_gateway_ready_for_startup() -> bool:
+    """Confirm the standalone gateway is healthy before exposing the instance listener."""
+    gateway_host = get_coordinator_host()
+    gateway_port = get_coordinator_port()
+    _info(f"Checking gateway health at {gateway_host}:{gateway_port} before starting instance MCP listener.")
+    if registry.ensure_registry_server():
+        _info(f"Gateway is healthy at {gateway_host}:{gateway_port}; continuing instance startup.")
+        return True
+
+    _error(
+        f"Gateway preflight failed at {gateway_host}:{gateway_port}; "
+        "instance MCP listener will not be started."
+    )
+    diag = _gateway_diagnostics_text()
+    if diag:
+        _error(f"Gateway diagnostics: {diag}")
+    return False
+
+
+def _register_with_coordinator(port: int) -> bool:
     """向协调器注册当前实例元信息。
 
     参数:
         port: 当前实例 FastMCP HTTP 监听端口。
     说明:
-        * 首个实例若发现协调器端口空闲会由 registry 内部启动协调器。
+        * 若独立协调器/HTTP proxy 尚未运行，会按需拉起。
         * 注册内容包括: pid / port / 输入文件路径 / idb 路径 / Python 版本等。
     """
     if idaapi is None:
-        return
+        return False
     global _cached_input_file, _cached_idb_path
     _prime_path_caches()
     try:
         registry.init_and_register(port, _cached_input_file, _cached_idb_path)
-        http_proxy_url = start_http_proxy_if_coordinator()
+        http_proxy_ready = start_http_proxy_if_coordinator()
+        _reset_heartbeat_failure_tracking()
         _info(f"Registered instance at port={port} pid={os.getpid()} input='{_cached_input_file}' idb='{_cached_idb_path}'")
-        if http_proxy_url:
-            _info(f"HTTP MCP proxy started at {http_proxy_url}")
-        # 若本实例成为协调器, 追加一条提示日志 (用户需求)
-        try:
-            if getattr(registry, 'is_coordinator', lambda: False)():  # type: ignore[attr-defined]
-                _info(f"This instance is COORDINATOR (registry listening on {get_coordinator_host()}:{get_coordinator_port()})")
-        except Exception:
-            pass
+        if http_proxy_ready:
+            _info(
+                f"HTTP MCP proxy listening on "
+                f"http://{get_http_bind_host()}:{get_http_port()}{get_http_path()}"
+            )
+        elif is_http_enabled():
+            proxy_status = getattr(registry, "get_http_proxy_status", lambda: {})()
+            status_parts = []
+            if proxy_status.get("python"):
+                status_parts.append(f"python={proxy_status['python']}")
+            if proxy_status.get("log"):
+                status_parts.append(f"log={proxy_status['log']}")
+            if proxy_status.get("last_error"):
+                status_parts.append(f"last_error={proxy_status['last_error']}")
+            suffix = f" ({', '.join(status_parts)})" if status_parts else ""
+            _warn(f"HTTP MCP proxy launch requested but not yet reachable{suffix}")
+        gateway_suffix = get_http_path() if is_http_enabled() else ""
+        _info(f"Gateway listening on {get_http_bind_host()}:{get_http_port()}{gateway_suffix}")
+        return True
     except Exception as e:  # pragma: no cover
-        _error(f"Coordinator registration failed: {e}")
+        _error(f"Gateway registration failed: {e}")
+        diag = _gateway_diagnostics_text()
+        if diag:
+            _error(f"Gateway diagnostics: {diag}")
         traceback.print_exc()
+        return False
 
 
 def is_running() -> bool:
-    return _server_thread is not None and _server_thread.is_alive()
+    return (
+        (_startup_thread is not None and _startup_thread.is_alive())
+        or (_server_thread is not None and _server_thread.is_alive())
+    )
 
 
 def stop_server():
@@ -302,24 +481,34 @@ def stop_server():
     步骤:
         1. 设置 ``_uv_server.should_exit`` 触发 uvicorn 事件循环退出。
         2. join 后台线程 (最多 5 秒)。
-        3. 若已注册协调器则执行注销。
+        3. 向独立协调器注销当前实例。
     并发安全:
         使用 ``_stop_lock`` 以防多次同时调用。
     """
-    global _uv_server, _server_thread
+    global _startup_thread, _uv_server, _server_thread
     with _stop_lock:
-        if _uv_server is None:
+        startup_thread = _startup_thread
+        startup_active = startup_thread is not None and startup_thread.is_alive()
+        if _uv_server is None and not startup_active:
             _info("Stop requested, but server not running.")
             return
+        if startup_active:
+            _startup_stop.set()
+            _info("Startup cancellation requested.")
         try:
             # Graceful shutdown
-            if hasattr(_uv_server, 'trigger_exit'):
-                _uv_server.trigger_exit()  # type: ignore[attr-defined]
-            else:
-                _uv_server.should_exit = True  # type: ignore[attr-defined]
-            _info("Shutdown signal sent to uvicorn server.")
+            if _uv_server is not None:
+                if hasattr(_uv_server, "trigger_exit"):
+                    _uv_server.trigger_exit()  # type: ignore[attr-defined]
+                else:
+                    _uv_server.should_exit = True  # type: ignore[attr-defined]
+                _info("Shutdown signal sent to uvicorn server.")
         except Exception as e:  # pragma: no cover
             _error(f"Failed to signal shutdown: {e}")
+        if startup_thread:
+            startup_thread.join(timeout=5)
+            if not startup_thread.is_alive():
+                _startup_thread = None
         if _server_thread:
             # Join server thread with timeout
             _server_thread.join(timeout=5)
@@ -338,6 +527,7 @@ def stop_server():
             _hb_stop.set()
             _hb_thread.join(timeout=3)
         _hb_thread = None
+        _reset_heartbeat_failure_tracking()
         _info("Server stopped.")
 
 def PLUGIN_ENTRY():  # IDA looks for this symbol
@@ -363,12 +553,7 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
                 time.sleep(1)
                 if not is_running():
                     host = os.getenv("IDA_MCP_HOST") or get_ida_host()
-                    env_port = os.getenv("IDA_MCP_PORT")
-                    hold_sock = None
-                    if env_port and env_port.isdigit():
-                        port = int(env_port)
-                    else:
-                        port, hold_sock = _find_free_port(DEFAULT_PORT, host)
+                    port, hold_sock = _select_start_port(host)
                     start_server_async(host, port, hold_sock)
             t = threading.Thread(target=_auto, daemon=True)
             t.start()
@@ -401,15 +586,13 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
         _info(f"Transport modes enabled: {', '.join(modes)}")
         # Host 选择: 优先环境变量，其次 config.conf，最后默认值
         host = os.getenv("IDA_MCP_HOST") or get_ida_host()
-        # 端口选择: 优先使用环境变量; 否则自动扫描以支持多实例
+        # 端口选择: 若设置 IDA_MCP_PORT，则以其为起点继续向上探测
         # 必须使用实际监听地址进行端口探测
-        env_port = os.getenv("IDA_MCP_PORT")
-        hold_sock = None
-        if env_port and env_port.isdigit():
-            port = int(env_port)
-        else:
-            port, hold_sock = _find_free_port(DEFAULT_PORT, host)
-        _info(f"Starting MCP server at http://{host}:{port}/mcp (toggle to stop)")
+        port, hold_sock = _select_start_port(host)
+        _info(
+            f"Preparing MCP startup for http://{host}:{port}/mcp/ "
+            "(gateway preflight first; toggle to stop)"
+        )
         start_server_async(host, port, hold_sock)
         # 在后台预构建字符串缓存，避免首次 list_strings 调用超时
         _warmup_caches()
@@ -419,67 +602,63 @@ class IDAMCPPlugin(idaapi.plugin_t if idaapi else object):  # type: ignore
         if is_running():
             stop_server()
 
-def start_server_async(host: str, port: int, hold_sock=None):
-    """异步(线程)启动 uvicorn FastMCP 服务。
 
-    设计要点:
-        * 使用守护线程避免阻塞 IDA 主线程。
-        * 通过保存 ``_uv_server`` 引用实现优雅关闭 (设置 should_exit)。
-        * 线程启动后立即向协调器注册 (保持实例可发现性)。
-        * hold_sock: 端口占位 socket, 在 uvicorn 绑定前释放以最小化竞态窗口。
-    """
+def _start_instance_server_threads(host: str, port: int, hold_sock=None) -> None:
+    """Launch the instance uvicorn worker only after gateway preflight has passed."""
     global _server_thread, _uv_server
-    if is_running():
-        if hold_sock:
-            try: hold_sock.close()
-            except Exception: pass
-        _info("Server already running; start request ignored.")
-        return
-
-    _prime_path_caches()
+    server_ready = threading.Event()
+    server_failed = threading.Event()
 
     def worker():
         global _uv_server
-        # 释放端口占位 socket, 紧接着 uvicorn 绑定同一端口
-        if hold_sock:
-            try: hold_sock.close()
-            except Exception: pass
+        if hold_sock is not None:
+            try:
+                hold_sock.close()
+            except Exception:
+                pass
         try:
-            # Windows 控制台噪音抑制: 使用 Selector 事件循环替代 Proactor，
-            # 规避 asyncio 在 _ProactorBasePipeTransport._call_connection_lost 中
-            # 打印的 ConnectionResetError(WinError 10054) 回调异常。
+            # Windows ???????: ?? Selector ?????? Proactor?
+            # ?? asyncio ? _ProactorBasePipeTransport._call_connection_lost ?
+            # ??? ConnectionResetError(WinError 10054) ?????
             if os.name == "nt":
                 try:
                     import asyncio  # type: ignore
                     if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
                         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
                 except Exception:
-                    pass  # 策略设置失败时不影响后续逻辑，最多产生原有控制台提示
-            server = create_mcp_server()
-            # 构建 ASGI 应用 (Streamable HTTP), 挂载路径 '/mcp'
+                    pass  # ??????????????????????????
+            server = create_mcp_server(enable_unsafe=is_unsafe_enabled())
+            # ?? ASGI ?? (Streamable HTTP), ???? '/mcp'
             app = server.http_app(path="/mcp")  # type: ignore[attr-defined]
-            # 在导入 uvicorn 之前再次确保过滤器生效
+            # ??? uvicorn ???????????
             import warnings as _w
             _w.filterwarnings("ignore", category=DeprecationWarning, module=r"websockets")
             _w.filterwarnings("ignore", category=DeprecationWarning, module=r"uvicorn")
             import uvicorn  # Local import to avoid overhead if never started
-            # 使用 warning 日志级别并关闭 access log, 避免输出无意义的 CTRL+C 提示。
             from ida_mcp.utils import (
+                StreamableHTTPSessionCleanupMiddleware,
                 create_event_driven_server,
                 get_streamable_http_session_manager,
-                StreamableHTTPSessionCleanupMiddleware,
             )
+
             session_manager = get_streamable_http_session_manager(app)
             if session_manager is not None and hasattr(app, "add_middleware"):
                 app.add_middleware(
                     StreamableHTTPSessionCleanupMiddleware,
                     session_manager=session_manager,
                 )
-            config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False, timeout_keep_alive=86400)
+            config = uvicorn.Config(
+                app,
+                host=host,
+                port=port,
+                log_level="warning",
+                access_log=False,
+                timeout_keep_alive=86400,
+            )
             _uv_server = create_event_driven_server(config)
-            # 不使用 uvicorn.Server.run()（其内部会创建/管理事件循环），
-            # 我们在此线程内显式创建 loop 并安装异常处理器，以抑制
-            # Windows 下常见的 WinError 10054 “远程主机强迫关闭连接”噪音。
+            # ??? uvicorn.Server.run()???????/????????
+            # ??????????? loop ????????????
+            # Windows ???? WinError 10054 ???????????????
             import asyncio
 
             def _exception_handler(loop, context):  # type: ignore[no-untyped-def]
@@ -497,6 +676,12 @@ def start_server_async(host: str, port: int, hold_sock=None):
             try:
                 asyncio.set_event_loop(loop)
                 loop.set_exception_handler(_exception_handler)
+                threading.Thread(
+                    target=_wait_for_server_start,
+                    args=(server_ready, _uv_server),
+                    name="IDA-MCP-ServerReady",
+                    daemon=True,
+                ).start()
                 if hasattr(_uv_server, "serve"):
                     loop.run_until_complete(_uv_server.serve())  # type: ignore[attr-defined]
                 else:  # pragma: no cover
@@ -515,6 +700,7 @@ def start_server_async(host: str, port: int, hold_sock=None):
                 except Exception:
                     pass
         except Exception as e:  # pragma: no cover
+            server_failed.set()
             _error(f"Server crashed: {e}")
             traceback.print_exc()
         finally:
@@ -523,21 +709,67 @@ def start_server_async(host: str, port: int, hold_sock=None):
 
     _server_thread = threading.Thread(target=worker, name="IDA-MCP-Server", daemon=True)
     _server_thread.start()
-    # Record chosen port after thread start
-    global _active_port
-    _active_port = port
-    _register_with_coordinator(port)
-    # 记录注册时间并启动心跳线程
-    global _hb_thread, _last_register_ts
-    _last_register_ts = time.time()
-    if _hb_thread is None or not _hb_thread.is_alive():
-        _hb_stop.clear()
-        _hb_thread = threading.Thread(target=_heartbeat_loop, name="IDA-MCP-Heartbeat", daemon=True)
-        _hb_thread.start()
-        _info("Heartbeat thread started.")
+    threading.Thread(
+        target=_complete_startup_in_background,
+        args=(host, port, server_ready, server_failed),
+        name="IDA-MCP-StartupFinalize",
+        daemon=True,
+    ).start()
+
+
+def start_server_async(host: str, port: int, hold_sock=None):
+    """??(??)?? uvicorn FastMCP ???
+
+    ????:
+        * ?????????? IDA ????
+        * ????? listener ??, ????? gateway ???, ???????????????
+        * ???? ``_uv_server`` ???????? (?? should_exit)?
+        * ???? MCP ????????????????
+        * hold_sock: ???? socket, ??? listener ??????????????
+    """
+    global _startup_thread
+    if is_running():
+        if hold_sock is not None:
+            try:
+                hold_sock.close()
+            except Exception:
+                pass
+        _info("Server already running; start request ignored.")
+        return
+
+    _prime_path_caches()
+    _startup_stop.clear()
+
+    def bootstrap():
+        global _startup_thread
+        pending_hold_sock = hold_sock
+        try:
+            if _startup_stop.is_set():
+                return
+            if not _ensure_gateway_ready_for_startup():
+                return
+            if _startup_stop.is_set():
+                _info("Startup cancelled before instance MCP listener launch.")
+                return
+            _info(f"Gateway preflight complete; starting instance MCP listener at http://{host}:{port}/mcp/")
+            _start_instance_server_threads(host, port, pending_hold_sock)
+            pending_hold_sock = None
+        finally:
+            if pending_hold_sock is not None:
+                try:
+                    pending_hold_sock.close()
+                except Exception:
+                    pass
+            _startup_thread = None
+
+    _startup_thread = threading.Thread(target=bootstrap, name="IDA-MCP-Startup", daemon=True)
+    _startup_thread.start()
+
 
 if __name__ == "__main__":
     _info("Standalone mode: starting server.")
     start_server_async("127.0.0.1", DEFAULT_PORT)
+    if _startup_thread:
+        _startup_thread.join()
     if _server_thread:
         _server_thread.join()

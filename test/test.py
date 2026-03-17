@@ -43,14 +43,33 @@ if PROJECT_ROOT not in sys.path:
 # 可用的模块 markers
 MODULES = ["core", "analysis", "types", "modify", "memory", "stack", "debug", "resources", "lifecycle"]
 
+GATEWAY_HOST = "127.0.0.1"
+GATEWAY_PORT = 11338
+GATEWAY_INTERNAL_BASE = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/internal"
 
-def check_coordinator() -> bool:
-    """检查 coordinator 是否可用。"""
+
+def check_gateway() -> bool:
+    """检查 gateway internal API 是否可用。"""
     import urllib.request
     import json
     
     try:
-        url = "http://127.0.0.1:11337/instances"
+        url = f"{GATEWAY_INTERNAL_BASE}/healthz"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            return bool(isinstance(data, dict) and data.get("ok"))
+    except Exception:
+        return False
+
+
+def check_instances_available() -> bool:
+    """检查是否已有已注册的 IDA 实例。"""
+    import urllib.request
+    import json
+
+    try:
+        url = f"{GATEWAY_INTERNAL_BASE}/instances"
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=2) as resp:
             data = json.loads(resp.read().decode('utf-8'))
@@ -66,7 +85,7 @@ def check_http_proxy() -> bool:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
-        result = sock.connect_ex(("127.0.0.1", 11338))
+        result = sock.connect_ex((GATEWAY_HOST, GATEWAY_PORT))
         sock.close()
         return result == 0
     except Exception:
@@ -90,10 +109,17 @@ def run_tests(args: list | None = None):
         print("ERROR: pytest not installed. Run: pip install pytest")
         return 1
     
-    # 检查 coordinator
-    if not check_coordinator():
-        print("WARNING: No IDA instances available.")
+    # 检查 gateway / 实例可用性
+    if not check_gateway():
+        print(f"WARNING: Gateway internal API not available at {GATEWAY_INTERNAL_BASE}")
         print("Please start IDA and load the MCP plugin first.")
+        print()
+        response = input("Continue anyway? (y/N): ").strip().lower()
+        if response != 'y':
+            return 1
+    elif not check_instances_available():
+        print("WARNING: No IDA instances available.")
+        print("Please open a binary in IDA and ensure the MCP plugin is running.")
         print()
         response = input("Continue anyway? (y/N): ").strip().lower()
         if response != 'y':
@@ -126,7 +152,7 @@ def run_tests(args: list | None = None):
     # 检查 HTTP 代理（如果需要）
     if transport_mode in ("http", "both"):
         if not check_http_proxy():
-            print("WARNING: HTTP proxy not available at 127.0.0.1:11338")
+            print(f"WARNING: HTTP proxy not available at {GATEWAY_HOST}:{GATEWAY_PORT}")
             if transport_mode == "http":
                 print("Please check config.conf and restart IDA plugin.")
                 return 1

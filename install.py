@@ -353,11 +353,9 @@ def render_config(config: dict[str, object]) -> str:
             "# Transport switches",
             f"enable_stdio = {quote_config_value(config['enable_stdio'])}",
             f"enable_http = {quote_config_value(config['enable_http'])}",
+            f"enable_unsafe = {quote_config_value(config['enable_unsafe'])}",
             "",
-            "# Coordinator settings (host is fixed to 127.0.0.1 in code)",
-            f"coordinator_port = {quote_config_value(config['coordinator_port'])}",
-            "",
-            "# HTTP proxy settings",
+            "# HTTP gateway settings (single-port gateway)",
             f"http_host = {quote_config_value(config['http_host'])}",
             f"http_port = {quote_config_value(config['http_port'])}",
             f"http_path = {quote_config_value(config['http_path'])}",
@@ -378,7 +376,7 @@ def build_config_interactively(defaults: dict[str, object], ida_executable: Path
     config = {
         "enable_stdio": bool(defaults.get("enable_stdio", False)),
         "enable_http": bool(defaults.get("enable_http", True)),
-        "coordinator_port": int(defaults.get("coordinator_port", 11337)),
+        "enable_unsafe": bool(defaults.get("enable_unsafe", True)),
         "http_host": str(defaults.get("http_host", "127.0.0.1")),
         "http_port": int(defaults.get("http_port", 11338)),
         "http_path": str(defaults.get("http_path", "/mcp")),
@@ -389,12 +387,12 @@ def build_config_interactively(defaults: dict[str, object], ida_executable: Path
     }
 
     print("\nConfigure ida_mcp/config.conf")
-    config["enable_http"] = prompt_bool("Enable HTTP proxy mode", bool(config["enable_http"]))
-    config["enable_stdio"] = prompt_bool("Enable stdio proxy mode", bool(config["enable_stdio"]))
-    config["coordinator_port"] = prompt_int("Coordinator port", int(config["coordinator_port"]))
-    config["http_host"] = prompt("HTTP proxy host", str(config["http_host"]))
-    config["http_port"] = prompt_int("HTTP proxy port", int(config["http_port"]))
-    config["http_path"] = prompt("HTTP proxy path", str(config["http_path"]))
+    config["enable_http"] = prompt_bool("Enable HTTP gateway mode", bool(config["enable_http"]))
+    config["enable_stdio"] = prompt_bool("Enable stdio mode", bool(config["enable_stdio"]))
+    config["enable_unsafe"] = prompt_bool("Enable unsafe tools", bool(config["enable_unsafe"]))
+    config["http_host"] = prompt("HTTP gateway bind host", str(config["http_host"]))
+    config["http_port"] = prompt_int("HTTP gateway port", int(config["http_port"]))
+    config["http_path"] = prompt("HTTP gateway MCP path", str(config["http_path"]))
     config["ida_default_port"] = prompt_int(
         "Per-instance default starting port",
         int(config["ida_default_port"]),
@@ -426,8 +424,8 @@ def print_summary(
     print(f"  Plugins dir    : {plugins_dir}")
     print(f"  enable_http    : {config['enable_http']}")
     print(f"  enable_stdio   : {config['enable_stdio']}")
-    print(f"  http endpoint  : {config['http_host']}:{config['http_port']}{config['http_path']}")
-    print(f"  coordinator    : 127.0.0.1:{config['coordinator_port']}")
+    print(f"  enable_unsafe  : {config['enable_unsafe']}")
+    print(f"  gateway bind   : {config['http_host']}:{config['http_port']}{config['http_path']}")
     print(f"  ida_default_port: {config['ida_default_port']}")
     print(f"  request_timeout: {config['request_timeout']}")
     print(f"  debug          : {config['debug']}")

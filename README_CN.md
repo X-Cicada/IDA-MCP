@@ -8,13 +8,13 @@
 
 [wiki](https://github.com/jelasin/IDA-MCP/wiki) [deepwiki](https://deepwiki.com/jelasin/IDA-MCP)
 
-## IDA-MCP (FastMCP + 多实例协调器)
+## IDA-MCP (FastMCP + 多实例网关)
 
 * 每个 IDA 实例都会暴露自己的 **FastMCP Streamable HTTP** 端点 `/mcp`
-* 第一个抢到 `127.0.0.1:11337` 的实例会成为内部**协调器**，维护内存注册表并转发工具调用
-* 协调器还可以启动面向 MCP 客户端的 HTTP 代理，默认地址是 `127.0.0.1:11338`
+* 独立网关守护进程负责维护内存中的实例注册表并转发工具调用
+* 同一个网关进程默认在 `127.0.0.1:11338` 上同时提供 `/internal` 内部 API 和 `/mcp` 客户端 MCP 入口
 * stdio 代理是独立子进程入口，但复用同一套 proxy 工具定义
-* MCP Resources 由各个 IDA 实例直接暴露，不走 coordinator/proxy
+* MCP Resources 由各个 IDA 实例直接暴露，不走 gateway/proxy
 
 ## 架构
 
@@ -44,8 +44,8 @@
 * **装饰器链模式**：`@tool` + `@idaread`/`@idawrite` 实现简洁的 API 定义
 * **批量操作**：大多数工具支持列表参数进行批量处理
 * **MCP 资源**：REST 风格的 `ida://` URI 模式，提供面向单实例直连的只读数据访问
-* **多实例支持**：端口 11337 上的协调器管理多个 IDA 实例
-* **默认偏向 HTTP**：仓库内默认配置为 `enable_http=true`、`enable_stdio=false`
+* **多实例支持**：默认监听在 11338 的独立网关管理多个 IDA 实例
+* **默认偏向 HTTP**：仓库内默认配置为 `enable_http=true`、`enable_stdio=false`、`enable_unsafe=true`
 * **IDA 8.x/9.x 兼容**：兼容层处理 API 差异
 * **字符串缓存**：字符串列表缓存避免每次调用重建，插件启动时后台预热
 * **自定义超时**：所有工具支持自定义超时参数，AI 可按需传入
@@ -155,7 +155,7 @@
 
 ```text
 IDA-MCP/
-  ida_mcp.py              # 插件入口：启动/停止单实例 HTTP MCP 服务 + 注册协调器
+  ida_mcp.py              # 插件入口：启动/停止单实例 HTTP MCP 服务 + 向网关注册
   ida_mcp/
     __init__.py           # 包初始化，自动发现，导出
     config.py             # 配置加载器（config.conf 解析器）
@@ -174,12 +174,12 @@ IDA-MCP/
     api_python.py         # Python 执行 API（不安全）
     api_lifecycle.py      # 生命周期 API（关闭/退出）
     api_resources.py      # MCP 资源
-    registry.py           # 协调器 / 多实例注册
+    registry.py           # 网关客户端辅助逻辑 / 多实例注册
     proxy/                # 基于 stdio 的 MCP 代理
       __init__.py         # 代理模块导出
       ida_mcp_proxy.py    # 主入口（stdio MCP 服务端）
       api_lifecycle.py    # proxy 侧生命周期 API 实现
-      _http.py            # 与协调器通信的 HTTP 辅助函数
+      _http.py            # 与网关通信的 HTTP 辅助函数
       _state.py           # 状态管理和端口验证
       _server.py          # FastMCP 服务端实例和工具注册
       register_tools.py   # 集中注册所有转发工具
@@ -198,18 +198,22 @@ IDA-MCP/
 4. 启动后，当前实例会：
    * 从 `10000` 开始选择一个空闲实例端口
    * 在 `http://127.0.0.1:<instance_port>/mcp/` 上提供该实例自己的 MCP 服务
-   * 向 `127.0.0.1:11337` 上的协调器注册
-   * 只有当前进程成为协调器且启用了 HTTP proxy 时，才会同时启动 `11338` 上的共享 HTTP proxy
+   * 确保独立网关守护进程可通过 `127.0.0.1:11338` 访问
+   * 通过 `http://127.0.0.1:11338/internal` 向网关内部 API 注册自己
 5. 再次触发插件会停止实例服务并注销。
+
+关闭某个 IDA 实例只会注销该实例；独立网关会继续运行，后续新实例仍可继续接入。
 
 `open_in_ida` 是 proxy 侧的生命周期工具。它会使用 `IDA_PATH` 或 `config.conf` 中的 `ida_path` 解析 IDA 可执行文件，带上 `IDA_MCP_AUTO_START=1` 启动，并在未显式指定时默认注入 `-A`，用于尽量减少启动交互，但不保证所有 IDA / loader / plugin 弹窗都被压掉。
 
+IDA-MCP 支持 WSL 兼容运行。在 WSL 环境下，`open_in_ida` 可以从 Linux 侧工具链直接启动 Windows 版 IDA，并会在启动前自动把目标文件路径转换成 Windows 路径。
+
 ## 传输概览
 
-项目里有三个不同端点，这一点很重要：
+项目里有两个网关侧端点，再加上每个实例自己的直连端点，这一点很重要：
 
-* `127.0.0.1:11337`：内部 coordinator HTTP API，用于实例注册和工具转发
-* `127.0.0.1:11338/mcp`：面向 MCP 客户端的 HTTP proxy，由 coordinator 在启用时启动
+* `127.0.0.1:11338/internal`：网关内部 HTTP API，用于实例注册和工具转发
+* `127.0.0.1:11338/mcp`：同一个独立网关进程暴露给 MCP 客户端的 HTTP proxy
 * `127.0.0.1:<instance_port>/mcp/`：某一个具体 IDA 实例的直连 MCP 端点
 
 仓库附带的 `mcp.json` 以及当前默认配置，都是围绕 `11338` 这个 HTTP proxy 来设计的。
@@ -222,7 +226,7 @@ proxy 通过 HTTP 和 stdio 暴露同一套转发工具：
 
 | 模式 | 说明 | 配置 |
 |------|------|------|
-| **HTTP proxy**（推荐） | 连接到 coordinator 持有的 `11338` proxy | 只需配置 `url` |
+| **HTTP proxy**（推荐） | 连接到独立网关暴露的 `11338` proxy | 只需配置 `url` |
 | **stdio proxy** | MCP 客户端以子进程方式启动 `ida_mcp/proxy/ida_mcp_proxy.py` | 需要配置 `command` 和 `args` |
 | **实例直连 HTTP** | 直接连到单个 IDA 实例，主要用于 `ida://` resources | 需要目标实例端口 |
 
@@ -243,7 +247,7 @@ proxy 通过 HTTP 和 stdio 暴露同一套转发工具：
 
 可在 Codex / Claude Code / LangChain / Cursor / VSCode 等任何 MCP 客户端上使用。
 
-proxy 和直连实例的参数名已经对齐。例如 `rename_function` 在两条路径上都使用 `address`，并同时接受符号名或数值地址。
+proxy 和直连实例的参数名已经对齐。例如 `rename_function` 在两条路径上都使用 `address`，并同时接受符号名或数值地址。多实例场景下，建议优先在 proxy 工具上显式传 `port`，不要依赖进程级默认实例状态。
 
 ### 配置文件
 
@@ -253,9 +257,10 @@ proxy 和直连实例的参数名已经对齐。例如 `rename_function` 在两�
 # 传输开关
 # enable_stdio = false
 # enable_http = true
+# enable_unsafe = true
 
 # 协调器设置
-# coordinator_port = 11337
+# coordinator_port = 11337  # 兼容旧配置；当前内部 API 已并入 http_port
 
 # HTTP 代理设置
 # http_host = "127.0.0.1"
@@ -273,14 +278,16 @@ proxy 和直连实例的参数名已经对齐。例如 `rename_function` 在两�
 
 说明：
 
-* coordinator host 和 direct instance host 在代码里固定为 `127.0.0.1`
+* gateway host 和 direct instance host 对客户端来说在代码里固定为 `127.0.0.1`
 * `IDA_PATH` 的优先级高于 `config.conf` 里的 `ida_path`
+* `IDA_MCP_ENABLE_UNSAFE=1|0` 的优先级高于 `config.conf` 里的 `enable_unsafe`
 * `open_in_ida` 不再接受 `ida_path` 工具参数；请通过 `IDA_PATH` 或 `config.conf` 配置 IDA 路径
-* 如果 `enable_stdio` 和 `enable_http` 都关掉，插件不会启动 coordinator / transport 栈
+* 支持 WSL：可以在 WSL 里使用整套工具，并通过 `open_in_ida` 启动 Windows 版 IDA
+* 如果 `enable_stdio` 和 `enable_http` 都关掉，插件不会启动 gateway / transport 栈
 
 ### 方式一：HTTP Proxy 模式（推荐）
 
-当 coordinator 已运行且启用了 HTTP proxy 时，客户端只需要 proxy URL，无需子进程。
+当独立网关已运行且启用了 HTTP proxy 时，客户端只需要 proxy URL，无需子进程。
 
 **Claude / Cherry Studio / Cursor 示例：**
 
@@ -321,7 +328,7 @@ proxy 和直连实例的参数名已经对齐。例如 `rename_function` 在两�
 
 ### 方式二：stdio Proxy 模式
 
-客户端以子进程方式启动代理。该 proxy 会连接 `11337` 上的 coordinator，并暴露与 HTTP proxy 相同的那套 proxy-side tools。
+客户端以子进程方式启动代理。该 proxy 会连接 `11338` 上的独立网关，并暴露与 HTTP proxy 相同的那套 proxy-side tools。
 
 **Claude / Cherry Studio / Cursor 示例：**
 

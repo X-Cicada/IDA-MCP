@@ -1,39 +1,37 @@
-"""HTTP 辅助函数 - 与协调器通信。"""
+"""HTTP helpers for communicating with the standalone gateway."""
 from __future__ import annotations
 
 import json
 import urllib.request
 from typing import Any
 
-# 从配置文件加载，若失败则使用默认值
-try:
-    from ..config import get_coordinator_url, get_request_timeout
-    COORD_URL = get_coordinator_url()
-    REQUEST_TIMEOUT = get_request_timeout()
-except Exception:
-    COORD_URL = "http://127.0.0.1:11337"
-    REQUEST_TIMEOUT = 30
+from ..config import get_coordinator_url, get_request_timeout
+from ..registry import ensure_registry_server
 
 
 def http_get(path: str) -> Any:
-    """GET 请求到协调器。"""
+    """GET request against the gateway internal API."""
+    if not ensure_registry_server():
+        return None
     try:
-        with urllib.request.urlopen(COORD_URL + path, timeout=REQUEST_TIMEOUT) as r:
+        with urllib.request.urlopen(get_coordinator_url() + path, timeout=get_request_timeout()) as r:
             return json.loads(r.read().decode('utf-8') or 'null')
     except Exception:
         return None
 
 
 def http_post(path: str, obj: dict, timeout: int | None = None) -> Any:
-    """POST 请求到协调器。"""
+    """POST request against the gateway internal API."""
+    if not ensure_registry_server():
+        return {"error": "Gateway unavailable"}
     data = json.dumps(obj).encode('utf-8')
     req = urllib.request.Request(
-        COORD_URL + path,
+        get_coordinator_url() + path,
         data=data,
         method='POST',
         headers={'Content-Type': 'application/json'}
     )
-    effective_timeout = timeout if timeout and timeout > 0 else REQUEST_TIMEOUT
+    effective_timeout = timeout if timeout and timeout > 0 else get_request_timeout()
     try:
         with urllib.request.urlopen(req, timeout=effective_timeout) as r:
             return json.loads(r.read().decode('utf-8') or 'null')

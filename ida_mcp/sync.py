@@ -20,6 +20,11 @@ except ImportError:
     # 允许在非 IDA 环境下导入（如测试），但不能执行装饰后的函数
     ida_kernwin = None
 
+try:
+    import ida_auto  # type: ignore
+except ImportError:
+    ida_auto = None
+
 F = TypeVar('F', bound=Callable[..., Any])
 
 _LOG_ARG_MAX = 80
@@ -130,3 +135,13 @@ def run_in_main_thread(fn: Callable[[], Any], write: bool = False) -> Any:
         函数返回值
     """
     return _run_in_ida(fn, write=write)
+
+
+def wait_for_auto_analysis() -> None:
+    """?? IDA ???????"""
+    if ida_auto is None:
+        return
+    try:
+        ida_auto.auto_wait()
+    except Exception:
+        pass

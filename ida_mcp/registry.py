@@ -1,561 +1,505 @@
-"""多实例协调器 (内存) + 工具转发 /call
-
-设计目的
-====================
-在多个 IDA 实例并行时, 需要一种轻量方式发现彼此并统一转发工具调用。本模块提供一个**内存驻留**的小型 HTTP 服务, 仅占用本地 ``127.0.0.1:11337`` 端口。
-
-角色与职责
---------------------
-1. 第一个尝试注册的实例若发现 11337 空闲 → 直接绑定并成为协调器。
-2. 其余实例仅向该协调器 POST /register 进行登记。
-3. 无任何磁盘持久化; 退出后状态自动丢弃。
-
-HTTP 接口
---------------------
-* ``GET  /instances``  : 返回当前注册的全部实例列表 (数组)
-* ``POST /register``   : 注册或刷新单个实例 (覆盖 pid 相同的旧记录)
-* ``POST /deregister`` : 注销实例 (进程退出 / 插件关闭)
-* ``POST /call``       : 将工具调用转发到指定实例 (通过 pid 或 port 识别)
-
-实例结构字段示例
---------------------
-```
-{
-    "pid": 1234,
-    "port": 10000,
-    "input_file": "/path/to/bin",
-    "idb": "/path/to/db.i64",
-    "started": 1730000000.123,   # 启动时间戳
-    "python": "3.11.9"
-}
-```
-
-转发机制 (/call)
---------------------
-1. 客户端 (或代理) 提交: { tool, params, pid|port }
-2. 协调器定位目标实例端口, 使用 streamable_http_client 发起一次真实工具调用。
-3. 对返回对象做 “可 JSON 序列化” 处理 (递归转普通结构) 后返回。
-
-并发与线程
---------------------
-* 采用 RLock 保护 _instances 列表。
-* 协调器 HTTPServer 运行在守护线程, 不阻塞调用方。
-
-扩展建议
---------------------
-* 增加心跳(定期刷新时间戳) + 过期清理。
-* 增加权限限制 (只允许本地请求 / 简单 token)。
-* 支持广播调用 (例如对所有实例同步执行某工具)。
-
-公开辅助函数
---------------------
-* ``init_and_register`` : 保证协调器存在并注册当前实例。
-* ``get_instances``     : 查询实例列表 (本地 or 远程)。
-* ``deregister``        : 注销当前实例。
-* ``call_tool``         : 调用 /call 进行一次转发。
-"""
-
+"""Client helpers for the standalone gateway service."""
 from __future__ import annotations
-import threading
-import json
-import time
-import socket
-import socketserver
-import http.server
-import urllib.request
-import urllib.error
-from typing import List, Dict, Any, Optional
-import os
+
 import atexit
+import json
+import ntpath
+import os
+import tempfile
+import shutil
+import socket
+import subprocess
 import sys
-try:
-    import ida_kernwin  # type: ignore
-except ImportError:
-    ida_kernwin = None
+import threading
+import time
+import urllib.error
+import urllib.request
+from typing import Any, Dict, List, Optional
 
-# 所有内部组件（协调器、IDA 实例）固定使用 127.0.0.1
-# 外部访问统一通过 HTTP 代理 (11338)
-LOCALHOST = "127.0.0.1"
-COORD_HOST = "127.0.0.1"
-IDA_HOST = "127.0.0.1"
+from .config import (
+    get_http_bind_host,
+    get_coordinator_host,
+    get_coordinator_port,
+    get_coordinator_url,
+    get_http_path,
+    get_http_port,
+    get_request_timeout,
+    is_http_enabled,
+    is_stdio_enabled,
+)
 
-# 从配置文件加载可配置项
-try:
-    from .config import (
-        get_coordinator_port,
-        get_request_timeout,
-        is_debug_enabled as _config_debug,
-    )
-    COORD_PORT = get_coordinator_port()
-    REQUEST_TIMEOUT = get_request_timeout()
-    DEBUG_ENABLED = _config_debug()
-except Exception:
-    COORD_PORT = 11337
-    REQUEST_TIMEOUT = 30
-    DEBUG_ENABLED = False
 
-DEBUG_MAX_LEN = 1000
-
-_instances: List[Dict[str, Any]] = []
-_lock = threading.RLock()
-_is_coordinator = False
-_server_thread: Optional[threading.Thread] = None
+_registry_start_lock = threading.Lock()
+_http_proxy_start_lock = threading.Lock()
 _self_pid = os.getpid()
-_current_instance_port: Optional[int] = None
+_deregister_registered = False
+_launch_status: Dict[str, Dict[str, Any]] = {
+    "registry_server": {},
+    "http_proxy": {},
+}
 
-# 每个 IDA 实例端口一把锁，序列化对同一实例的并发 /call 请求，
-# 防止同时创建多个 MCP session 导致 session manager 崩溃。
-_call_locks: Dict[int, threading.Lock] = {}
-_call_locks_guard = threading.Lock()
 
-def _short(v: Any) -> str:
+def _coordinator_alive(timeout: float = 0.3) -> bool:
     try:
-        s = json.dumps(v, ensure_ascii=False)
-    except Exception:
-        s = str(v)
-    if len(s) > DEBUG_MAX_LEN:
-        return s[:DEBUG_MAX_LEN] + "..."
-    return s
-
-def _debug_log(event: str, **fields: Any):  # pragma: no cover
-    if not DEBUG_ENABLED:
-        return
-    ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
-    kv = ' '.join(f"{k}={_short(v)}" for k, v in fields.items())
-    line = f"[{ts}] [registry] {event} {kv}\n"
-    try:
-        if ida_kernwin and hasattr(ida_kernwin, 'execute_sync') and hasattr(ida_kernwin, 'msg'):
-            def _emit():  # type: ignore
-                try:
-                    ida_kernwin.msg(line)  # type: ignore
-                except Exception:
-                    try:
-                        print(line, end='')
-                    except Exception:
-                        pass
-                return 0
-            try:
-                ida_kernwin.execute_sync(_emit, ida_kernwin.MFF_READ)  # type: ignore
-            except Exception:
-                try:
-                    ida_kernwin.msg(line)  # type: ignore
-                except Exception:
-                    try:
-                        print(line, end='')
-                    except Exception:
-                        pass
-        else:
-            print(line, end='')
-    except Exception:
-        pass
-
-def set_debug(enable: bool):
-    global DEBUG_ENABLED
-    DEBUG_ENABLED = bool(enable)
-
-def is_debug_enabled() -> bool:
-    return DEBUG_ENABLED
-
-
-class _Handler(http.server.BaseHTTPRequestHandler):  # pragma: no cover
-    def log_message(self, format, *args):
-        return
-
-    def _send(self, code: int, obj: Any):
-        data = json.dumps(obj).encode('utf-8')
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(data)))
-        self.end_headers()
-        try:
-            self.wfile.write(data)
-        except (ConnectionAbortedError, BrokenPipeError, OSError) as e:  # pragma: no cover
-            # 客户端在响应发送途中断开 (WinError 10053/10054 或 POSIX EPIPE/ECONNRESET)，忽略即可，不影响后续请求。
-            # 选择静默处理 (方案A)，避免在频繁探测/超时重试场景刷屏。
-            pass
-    def do_GET(self):  # type: ignore
-        if self.path == '/instances':
-            with _lock:
-                _debug_log('GET /instances', count=len(_instances))
-                self._send(200, _instances)
-        elif self.path == '/current_instance':
-            with _lock:
-                _debug_log('GET /current_instance', port=_current_instance_port)
-                self._send(200, {"port": _current_instance_port})
-        elif self.path == '/debug':
-            self._send(200, {"enabled": DEBUG_ENABLED})
-        else:
-            self._send(404, {"error": "not found"})
-
-    def do_POST(self):  # type: ignore
-        global _current_instance_port
-        length = int(self.headers.get('Content-Length', '0'))
-        raw = self.rfile.read(length) if length else b''
-        try:
-            payload = json.loads(raw.decode('utf-8') or '{}')
-        except Exception:
-            payload = {}
-        _debug_log('POST', path=self.path, client=f"{self.client_address}", content_length=length)
-        if self.path == '/register':
-            needed = {'pid', 'port'}
-            if not needed.issubset(payload):
-                self._send(400, {"error": "missing fields"})
-                return
-            with _lock:
-                pid = payload['pid']
-                existing = [e for e in _instances if e.get('pid') != pid]
-                _instances.clear()
-                _instances.extend(existing)
-                _instances.append(payload)
-            _debug_log('REGISTER', pid=payload.get('pid'), port=payload.get('port'), input_file=payload.get('input_file'), idb=payload.get('idb'))
-            self._send(200, {"status": "ok"})
-        elif self.path == '/deregister':
-            pid = payload.get('pid')
-            if pid is None:
-                self._send(400, {"error": "missing pid"})
-                return
-            with _lock:
-                remaining = [e for e in _instances if e.get('pid') != pid]
-                if _current_instance_port and not any(e.get('port') == _current_instance_port for e in remaining):
-                    _current_instance_port = None
-                _instances.clear()
-                _instances.extend(remaining)
-            _debug_log('DEREGISTER', pid=pid, remaining=len(_instances))
-            self._send(200, {"status": "ok"})
-        elif self.path == '/select_instance':
-            port = payload.get('port')
-            with _lock:
-                if port is None:
-                    # Auto-select if port is not provided
-                    if not _instances:
-                        self._send(404, {"error": "No instances to select from"})
-                        return
-                    
-                    # Prioritize 10000, then earliest started
-                    sorted_instances = sorted(_instances, key=lambda x: (x.get('port') != 10000, x.get('started', float('inf'))))
-                    _current_instance_port = sorted_instances[0].get('port')
-                else:
-                    if not any(e.get('port') == port for e in _instances):
-                        self._send(404, {"error": f"Instance with port {port} not found"})
-                        return
-                    _current_instance_port = port
-            _debug_log('SELECT_INSTANCE', requested=port, selected=_current_instance_port)
-            self._send(200, {"status": "ok", "selected_port": _current_instance_port})
-        elif self.path == '/debug':
-            # Toggle debug logging: payload { enable: bool }
-            enable = bool(payload.get('enable') if 'enable' in payload else payload.get('enabled', False))
-            set_debug(enable)
-            self._send(200, {"status": "ok", "enabled": DEBUG_ENABLED})
-        elif self.path == '/call':
-            # payload: { pid | port, tool, params }
-            target_pid = payload.get('pid')
-            target_port = payload.get('port')
-            tool = payload.get('tool')
-            params = payload.get('params') or {}
-            if not tool:
-                self._send(400, {"error": "missing tool"})
-                return
-            with _lock:
-                target = None
-                if target_pid is not None:
-                    for e in _instances:
-                        if e.get('pid') == target_pid:
-                            target = e
-                            break
-                elif target_port is not None:
-                    for e in _instances:
-                        if e.get('port') == target_port:
-                            target = e
-                            break
-            if target is None:
-                self._send(404, {"error": "instance not found"})
-                return
-            port = target.get('port')
-            if not isinstance(port, int):
-                self._send(500, {"error": "bad target port"})
-                return
-            # 从请求体读取可选超时（AI 可传入自定义超时）
-            req_timeout = payload.get('timeout')
-            try:
-                effective_timeout = int(req_timeout) if req_timeout and int(req_timeout) > 0 else REQUEST_TIMEOUT
-            except (ValueError, TypeError):
-                effective_timeout = REQUEST_TIMEOUT
-            t0 = time.time()
-            _debug_log('CALL_BEGIN', tool=tool, target_port=port, pid=target.get('pid'), params_keys=list((params or {}).keys()), timeout=effective_timeout)
-            # Forward the tool call over HTTP MCP (JSON-RPC) using fastmcp Client dynamically.
-            # 内部通信固定使用 127.0.0.1（协调器与实例在同一台机器上）
-            mcp_url = f"http://{LOCALHOST}:{port}/mcp"
-            
-            # 先验证端口是否可连接
-            try:
-                with socket.create_connection((LOCALHOST, port), timeout=1.0):
-                    pass  # 端口可连接
-            except (ConnectionRefusedError, OSError, socket.timeout) as e:
-                err_msg = f"Port {port} not reachable: {type(e).__name__}: {e}"
-                _log_info(f"[PRE_CHECK_FAIL] {err_msg}")
-                self._send(500, {"error": err_msg})
-                return
-            
-            # 获取 per-port 锁，序列化对同一 IDA 实例的并发调用，
-            # 防止同时创建多个 MCP session 导致 session manager 崩溃。
-            with _call_locks_guard:
-                if port not in _call_locks:
-                    _call_locks[port] = threading.Lock()
-                call_lock = _call_locks[port]
-            
-            acquired = call_lock.acquire(timeout=effective_timeout + 5)
-            if not acquired:
-                self._send(503, {"error": f"Timed out waiting for call lock on port {port}"})
-                return
-            
-            try:
-                import asyncio
-                from mcp import ClientSession  # type: ignore
-                from mcp.client.streamable_http import streamable_http_client  # type: ignore
-                import httpx  # type: ignore
-
-                async def _do():
-                    http_timeout = httpx.Timeout(effective_timeout + 15)
-                    client_limits = httpx.Limits(max_connections=4, max_keepalive_connections=0)
-                    async with httpx.AsyncClient(timeout=http_timeout, limits=client_limits) as http_client:
-                        async with streamable_http_client(mcp_url, http_client=http_client) as (read, write, _get_sid):
-                            async with ClientSession(read, write) as session:
-                                await asyncio.wait_for(session.initialize(), timeout=effective_timeout)
-                                resp = await asyncio.wait_for(
-                                    session.call_tool(tool, arguments=params or {}),
-                                    timeout=effective_timeout,
-                                )
-                        # Extract data from response content (JSON text)
-                        data = None
-                        if hasattr(resp, 'content') and resp.content:
-                            for item in resp.content:
-                                text = getattr(item, 'text', None)
-                                if text:
-                                    try:
-                                        data = json.loads(text)
-                                        break
-                                    except (json.JSONDecodeError, TypeError):
-                                        continue
-                        # Fallback: try resp.data with normalization
-                        if data is None and hasattr(resp, 'data') and resp.data is not None:
-                            def norm(x):
-                                if isinstance(x, list):
-                                    return [norm(i) for i in x]
-                                if isinstance(x, dict):
-                                    return {k: norm(v) for k, v in x.items()}
-                                if hasattr(x, 'model_dump'):
-                                    return x.model_dump()
-                                if hasattr(x, '__dict__') and x.__dict__:
-                                    return norm(vars(x))
-                                return x
-                            data = norm(resp.data)
-                        return {"tool": tool, "data": data}
-
-                result = asyncio.run(_do())
-                
-                dt_ms = int((time.time() - t0) * 1000)
-                # Attempt to estimate response size
-                try:
-                    resp_size = len(json.dumps(result, ensure_ascii=False))
-                except Exception:
-                    resp_size = 0
-                _debug_log('CALL_OK', tool=tool, target_port=port, elapsed_ms=dt_ms, resp_size=resp_size)
-                self._send(200, result)
-            except BaseException as e:  # pragma: no cover  # BaseException to catch ExceptionGroup (Python 3.11+)
-                import traceback
-                dt_ms = int((time.time() - t0) * 1000)
-                # ExceptionGroup (from anyio TaskGroup) wraps real exceptions
-                if hasattr(e, 'exceptions'):
-                    sub_details = '; '.join(f"{type(se).__name__}: {se}" for se in e.exceptions)
-                    err_detail = f"{type(e).__name__}: [{sub_details}]"
-                else:
-                    err_detail = f"{type(e).__name__}: {e}"
-                
-                # 客户端断开连接时静默处理，不输出大量日志
-                is_disconnect = any(x in err_detail for x in [
-                    'BrokenResourceError', 'ConnectionAbortedError', 'ReadTimeout',
-                    'ConnectionResetError', 'BrokenPipeError'
-                ])
-                
-                if is_disconnect:
-                    _debug_log('CLIENT_DISCONNECT', tool=tool, target_port=port, elapsed_ms=dt_ms)
-                else:
-                    tb = traceback.format_exc()
-                    _debug_log('CALL_FAIL', tool=tool, target_port=port, elapsed_ms=dt_ms, error=err_detail, traceback=tb)
-                    # 输出到 IDA 控制台便于诊断
-                    _log_info(f"[CALL_FAIL] url={mcp_url} tool={tool}: {err_detail}")
-                
-                # 尝试发送错误响应，忽略连接已断开的情况
-                try:
-                    self._send(500, {"error": f"call failed ({mcp_url}): {err_detail}"})
-                except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
-                    pass  # 客户端已断开，忽略
-            finally:
-                call_lock.release()
-        else:
-            self._send(404, {"error": "not found"})
-
-class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
-
-def _start_coordinator():  # pragma: no cover
-    global _server_thread
-    if _server_thread and _server_thread.is_alive():
-        return
-    def run():
-        try:
-            # Use ThreadingHTTPServer to handle concurrent requests to different instances
-            httpd = ThreadingHTTPServer((COORD_HOST, COORD_PORT), _Handler)
-            httpd.serve_forever(poll_interval=5.0)
-        except Exception:
-            pass
-    _server_thread = threading.Thread(target=run, name="IDA-MCP-Registry", daemon=True)
-    _server_thread.start()
-
-
-def _log_info(msg: str):  # pragma: no cover
-    """输出日志到 IDA 消息窗口或控制台。"""
-    ts = time.strftime('%H:%M:%S', time.localtime())
-    line = f"[IDA-MCP][INFO][{ts}] {msg}\n"
-    try:
-        if hasattr(ida_kernwin, 'execute_sync') and hasattr(ida_kernwin, 'msg'):
-            def _emit():
-                try:
-                    ida_kernwin.msg(line)
-                except Exception:
-                    print(line, end='')
-                return 0
-            try:
-                ida_kernwin.execute_sync(_emit, ida_kernwin.MFF_READ)
-            except Exception:
-                try:
-                    ida_kernwin.msg(line)
-                except Exception:
-                    print(line, end='')
-        else:
-            print(line, end='')
-    except Exception:
-        pass
-
-def _coordinator_alive() -> bool:
-    """检测协调器是否存活（内部通信，固定使用 127.0.0.1）。"""
-    try:
-        with socket.create_connection((LOCALHOST, COORD_PORT), timeout=0.3):
+        with socket.create_connection((get_coordinator_host(), get_coordinator_port()), timeout=timeout):
             return True
     except OSError:
         return False
 
 
-def init_and_register(port: int, input_file: str | None, idb_path: str | None):
-    """确保协调器运行, 若不存在则当前进程抢占成为协调器, 然后注册本实例。
+def _http_proxy_alive(timeout: float = 0.3) -> bool:
+    status = _request_json("GET", "/proxy_status", timeout=timeout, ensure_server=False)
+    return bool(isinstance(status, dict) and status.get("running"))
 
-    参数:
-        port: 当前实例监听的 MCP 端口
-        input_file: 输入文件路径 (可能为 None)
-        idb_path: IDB 路径 (可能为 None)
-    逻辑:
-        1. 检查是否有传输方式启用，至少需要 enable_stdio 或 enable_http 其一
-        2. 尝试连接 11337; 若失败则尝试 bind -> 成为协调器并启动 HTTP 服务
-        3. 构造实例 payload 并 POST /register
-        4. 注册 atexit 钩子, 确保正常退出时自动注销
-    """
-    from .config import is_stdio_enabled, is_http_enabled
-    
-    # 如果两种传输方式都禁用，则不启动协调器
-    if not is_stdio_enabled() and not is_http_enabled():
-        _log_info("Both stdio and HTTP modes are disabled, coordinator not started")
-        return
-    
-    global _is_coordinator
-    if not _coordinator_alive():
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((COORD_HOST, COORD_PORT))
-            s.close()
-            _is_coordinator = True
-            _start_coordinator()
-        except OSError:
-            _is_coordinator = False
-    payload = {
-        'pid': _self_pid,
-        'port': port,
-        'host': IDA_HOST,  # 实例监听地址，用于远程访问
-        'input_file': input_file,
-        'idb': idb_path,
-        'started': time.time(),
-        'python': sys.version.split()[0],
-    }
-    # 如果是协调器，直接操作内存；否则通过 HTTP 注册
-    if _is_coordinator:
-        _register_local(payload)
-    else:
-        _post_json('/register', payload)
-    atexit.register(deregister)
 
-def is_coordinator() -> bool:
-    """返回当前进程是否为协调器 (第一个绑定 11337 的实例).
+def _gateway_ready(timeout: float = 0.5) -> bool:
+    status = _request_json("GET", "/healthz", timeout=timeout, ensure_server=False)
+    return bool(isinstance(status, dict) and status.get("ok"))
 
-    供外部在完成 init_and_register 调用后输出额外日志。
-    """
-    return _is_coordinator
 
-def _post_json(path: str, obj: Any):
-    """通过 HTTP POST 发送 JSON 到协调器（内部通信，固定使用 127.0.0.1）。"""
-    data = json.dumps(obj).encode('utf-8')
-    req = urllib.request.Request(f'http://{LOCALHOST}:{COORD_PORT}{path}', data=data, method='POST', headers={'Content-Type': 'application/json'})
+def _wait_for_gateway_ready(timeout: float) -> bool:
+    """Poll the health endpoint until the gateway becomes ready or times out."""
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while time.monotonic() < deadline:
+        if _gateway_ready():
+            return True
+        time.sleep(0.1)
+    return _gateway_ready()
+
+
+def _launch_log_path(name: str) -> str:
+    return os.path.join(tempfile.gettempdir(), f"ida_mcp_{name}.log")
+
+
+def _set_launch_status(name: str, **fields: Any) -> None:
+    status = dict(_launch_status.get(name, {}))
+    status.update(fields)
+    _launch_status[name] = status
+
+
+def _tail_log_line(path: str | None) -> str | None:
+    if not path or not os.path.exists(path):
+        return None
     try:
-        urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = [line.strip() for line in handle.readlines() if line.strip()]
+        return lines[-1] if lines else None
     except Exception:
-        pass
+        return None
 
-def _register_local(payload: dict):
-    """本地注册实例（协调器进程直接操作内存）。"""
-    with _lock:
-        pid = payload.get('pid')
-        existing = [e for e in _instances if e.get('pid') != pid]
-        _instances.clear()
-        _instances.extend(existing)
-        _instances.append(payload)
-    _debug_log('REGISTER_LOCAL', pid=payload.get('pid'), port=payload.get('port'))
+
+def _spawn_detached(args: List[str], cwd: str, log_path: Optional[str] = None) -> None:
+    log_handle = None
+    if log_path:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        log_handle = open(log_path, "ab")
+    kwargs: Dict[str, Any] = {
+        "cwd": cwd,
+        "stdin": subprocess.DEVNULL,
+        "stdout": log_handle if log_handle is not None else subprocess.DEVNULL,
+        "stderr": log_handle if log_handle is not None else subprocess.DEVNULL,
+        "close_fds": True if os.name != "nt" else False,
+    }
+    if os.name == "nt":
+        creationflags = 0
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        kwargs["creationflags"] = creationflags
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(args, **kwargs)
+    finally:
+        if log_handle is not None:
+            log_handle.close()
+
+
+def _is_python_executable(path: str | None) -> bool:
+    if not path:
+        return False
+    path_mod = ntpath if ("\\" in path or (len(path) > 1 and path[1] == ":")) else os.path
+    name = path_mod.basename(path).lower()
+    return name.startswith("python")
+
+
+def _candidate_python_executables() -> List[str]:
+    candidates: List[str] = []
+
+    for env_name in ("IDA_MCP_PYTHON", "PYTHON", "PYTHON3"):
+        value = os.environ.get(env_name)
+        if value:
+            candidates.append(value)
+
+    for value in (getattr(sys, "executable", None), getattr(sys, "_base_executable", None)):
+        if value:
+            candidates.append(value)
+
+    current_exe = getattr(sys, "executable", "") or ""
+    path_mod = ntpath if ("\\" in current_exe or (len(current_exe) > 1 and current_exe[1] == ":")) else os.path
+    current_dir = path_mod.dirname(current_exe)
+    if current_dir:
+        if path_mod is ntpath or os.name == "nt":
+            candidates.extend(
+                [
+                    path_mod.join(current_dir, "ida-python", "python.exe"),
+                    path_mod.join(current_dir, "python", "python.exe"),
+                    path_mod.join(current_dir, "python.exe"),
+                ]
+            )
+        else:
+            candidates.extend(
+                [
+                    path_mod.join(current_dir, "ida-python", "python3"),
+                    path_mod.join(current_dir, "ida-python", "python"),
+                    path_mod.join(current_dir, "python", "bin", "python3"),
+                    path_mod.join(current_dir, "python", "bin", "python"),
+                ]
+            )
+
+    for name in (["python.exe"] if os.name == "nt" else ["python3", "python"]):
+        resolved = shutil.which(name)
+        if resolved:
+            candidates.append(resolved)
+
+    seen = set()
+    ordered: List[str] = []
+    for candidate in candidates:
+        key = candidate.lower() if os.name == "nt" else candidate
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(candidate)
+    return ordered
+
+
+def _resolve_python_executable() -> str:
+    for candidate in _candidate_python_executables():
+        if not os.path.isfile(candidate):
+            continue
+        if _is_python_executable(candidate):
+            return candidate
+    raise RuntimeError(
+        "No standalone Python interpreter found for gateway launch. "
+        "Set IDA_MCP_PYTHON to a python executable."
+    )
+
+
+def _package_dir() -> str:
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _repo_root() -> str:
+    return os.path.dirname(_package_dir())
+
+
+def ensure_registry_server(startup_timeout: float = 3.0) -> bool:
+    """Ensure the standalone single-port gateway is reachable."""
+    if _gateway_ready():
+        return True
+
+    with _registry_start_lock:
+        if _gateway_ready():
+            return True
+        log_path = _launch_log_path("registry_server")
+        _set_launch_status(
+            "registry_server",
+            requested=True,
+            log=log_path,
+            alive=False,
+            last_error=None,
+        )
+
+        # A listener already exists on the target port. Give it a chance to finish
+        # booting into a healthy gateway, but do not spawn a second process.
+        if _coordinator_alive():
+            if _wait_for_gateway_ready(max(startup_timeout, 0.5)):
+                _set_launch_status("registry_server", alive=True, last_error=None)
+                return True
+            _set_launch_status(
+                "registry_server",
+                alive=False,
+                last_error=(
+                    f"Port {get_coordinator_port()} is already listening on {get_coordinator_host()} "
+                    "but did not respond as a healthy IDA-MCP gateway."
+                ),
+            )
+            return False
+
+        python_exe = _resolve_python_executable()
+        _set_launch_status(
+            "registry_server",
+            python=python_exe,
+        )
+        _spawn_detached(
+            [
+                python_exe,
+                "-m",
+                "ida_mcp.registry_server",
+                "--host",
+                get_http_bind_host(),
+                "--port",
+                str(get_coordinator_port()),
+            ],
+            cwd=_repo_root(),
+            log_path=log_path,
+        )
+
+        if _wait_for_gateway_ready(max(startup_timeout, 8.0)):
+            _set_launch_status("registry_server", alive=True, last_error=None)
+            return True
+        _set_launch_status(
+            "registry_server",
+            alive=False,
+            last_error=_tail_log_line(log_path) or "gateway did not become reachable in time",
+        )
+        return False
+
+
+def ensure_http_proxy_running(startup_timeout: float = 3.0) -> bool:
+    """Ensure the merged gateway process has brought the HTTP proxy online."""
+    if not is_http_enabled():
+        _set_launch_status("http_proxy", requested=False, enabled=False, alive=False)
+        return False
+    if _http_proxy_alive():
+        _set_launch_status(
+            "http_proxy",
+            requested=True,
+            enabled=True,
+            alive=True,
+            python=_launch_status.get("http_proxy", {}).get("python"),
+            log=_launch_status.get("http_proxy", {}).get("log"),
+            last_error=None,
+        )
+        return True
+
+    with _http_proxy_start_lock:
+        if _http_proxy_alive():
+            _set_launch_status("http_proxy", requested=True, enabled=True, alive=True, last_error=None)
+            return True
+
+        if not ensure_registry_server():
+            _set_launch_status(
+                "http_proxy",
+                requested=True,
+                enabled=True,
+                alive=False,
+                python=_launch_status.get("registry_server", {}).get("python"),
+                log=_launch_status.get("registry_server", {}).get("log"),
+                last_error="gateway not reachable",
+            )
+            return False
+
+        gateway_status = dict(_launch_status.get("registry_server", {}))
+        log_path = gateway_status.get("log") or _launch_log_path("registry_server")
+        _set_launch_status(
+            "http_proxy",
+            requested=True,
+            enabled=True,
+            python=gateway_status.get("python"),
+            log=log_path,
+            alive=False,
+            last_error=None,
+        )
+
+        status = _request_json("POST", "/ensure_proxy", {}, timeout=1.0, ensure_server=False)
+        if isinstance(status, dict):
+            _set_launch_status(
+                "http_proxy",
+                enabled=bool(status.get("enabled", True)),
+                alive=bool(status.get("running", False)),
+                log=log_path,
+                last_error=status.get("last_error"),
+            )
+
+        deadline = time.monotonic() + max(startup_timeout, 8.0)
+        while time.monotonic() < deadline:
+            if _http_proxy_alive():
+                _set_launch_status("http_proxy", alive=True, last_error=None)
+                return True
+            time.sleep(0.1)
+        status = _request_json("GET", "/proxy_status", ensure_server=False)
+        last_error = None
+        if isinstance(status, dict):
+            last_error = status.get("last_error")
+        _set_launch_status(
+            "http_proxy",
+            alive=False,
+            last_error=last_error or "http proxy did not become reachable in time",
+        )
+        return False
+
+
+def _request_json(
+    method: str,
+    path: str,
+    payload: Optional[dict] = None,
+    timeout: Optional[float] = None,
+    ensure_server: bool = True,
+) -> Any:
+    if ensure_server and not _gateway_ready() and not ensure_registry_server():
+        return None
+
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(
+        get_coordinator_url() + path,
+        data=data,
+        method=method,
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=get_request_timeout() if timeout is None else timeout) as resp:
+            return json.loads(resp.read().decode("utf-8") or "null")
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read().decode("utf-8") or "null")
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _register_atexit_once() -> None:
+    global _deregister_registered
+    if _deregister_registered:
+        return
+    atexit.register(deregister)
+    _deregister_registered = True
+
+
+def _format_registry_server_failure() -> str:
+    """Build a concise diagnostic string for gateway launch failures."""
+    status = get_registry_server_status()
+    parts = [
+        f"python={status.get('python') or _resolve_python_executable()}",
+    ]
+    log_path = status.get("log") or _launch_log_path("registry_server")
+    parts.append(f"log={log_path}")
+    if status.get("last_error"):
+        parts.append(f"last_error={status['last_error']}")
+    return ", ".join(parts)
+
+
+def init_and_register(port: int, input_file: str | None, idb_path: str | None) -> None:
+    """Register the current IDA instance with the standalone gateway."""
+    if not is_stdio_enabled() and not is_http_enabled():
+        return
+    if not ensure_registry_server():
+        raise RuntimeError(
+            f"Gateway not reachable at {get_coordinator_host()}:{get_coordinator_port()} "
+            f"({_format_registry_server_failure()})"
+        )
+
+    payload = {
+        "pid": _self_pid,
+        "port": port,
+        "host": "127.0.0.1",
+        "input_file": input_file,
+        "idb": idb_path,
+        "started": time.time(),
+        "python": sys.version.split()[0],
+    }
+
+    for _ in range(10):
+        result = _request_json("POST", "/register", payload, timeout=0.5, ensure_server=False)
+        if isinstance(result, dict) and result.get("status") == "ok":
+            _register_atexit_once()
+            return
+        if not _coordinator_alive() and not ensure_registry_server():
+            break
+        time.sleep(0.1)
+
+    raise RuntimeError(
+        f"Failed to register instance on gateway {get_coordinator_host()}:{get_coordinator_port()} "
+        f"({_format_registry_server_failure()})"
+    )
+
 
 def get_instances() -> List[Dict[str, Any]]:
-    """获取所有已注册实例（内部通信，固定使用 127.0.0.1）。"""
-    if _is_coordinator:
-        with _lock:
-            return list(_instances)
-    try:
-        with urllib.request.urlopen(f'http://{LOCALHOST}:{COORD_PORT}/instances', timeout=REQUEST_TIMEOUT) as resp:  # type: ignore
-            raw = resp.read()
-            data = json.loads(raw.decode('utf-8') or '[]')
-            if isinstance(data, list):
-                return data
-    except Exception:
-        return []
-    return []
+    """Return registered instances from the standalone gateway."""
+    data = _request_json("GET", "/instances")
+    return data if isinstance(data, list) else []
 
-def deregister():  # pragma: no cover
-    _post_json('/deregister', {'pid': _self_pid})
 
-def call_tool(pid: int | None = None, port: int | None = None, tool: str = '', params: dict | None = None) -> dict:
-    """调用指定实例的工具（内部通信，固定使用 127.0.0.1）。"""
-    body = json.dumps({"pid": pid, "port": port, "tool": tool, "params": params or {}}).encode('utf-8')
-    req = urllib.request.Request(f'http://{LOCALHOST}:{COORD_PORT}/call', data=body, method='POST', headers={'Content-Type': 'application/json'})
-    try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:  # type: ignore
-            raw = resp.read()
-            return json.loads(raw.decode('utf-8') or '{}')
-    except Exception as e:
-        return {"error": str(e)}
+def deregister() -> bool:  # pragma: no cover
+    result = _request_json(
+        "POST",
+        "/deregister",
+        {"pid": _self_pid},
+        timeout=0.5,
+        ensure_server=False,
+    )
+    return isinstance(result, dict) and result.get("status") == "ok"
+
+
+def call_tool(
+    pid: int | None = None,
+    port: int | None = None,
+    tool: str = "",
+    params: dict | None = None,
+) -> dict:
+    """Forward a tool invocation through the gateway."""
+    result = _request_json(
+        "POST",
+        "/call",
+        {"pid": pid, "port": port, "tool": tool, "params": params or {}},
+    )
+    return result if isinstance(result, dict) else {"error": "Gateway unavailable"}
+
 
 def check_connection() -> dict:
-    """检查当前是否存在至少一个已注册的 IDA MCP 实例。
+    instances = get_instances()
+    return {"ok": _gateway_ready(), "count": len(instances)}
 
-    返回:
-        {"ok": True, "count": n}  当 n>0 时
-        {"ok": False, "count": 0} 当没有实例或协调器不可达
-    说明:
-        * 供外部快速健康探测使用, 不会抛异常, 统一结构。
-    """
-    inst = get_instances()
-    return {"ok": bool(inst), "count": len(inst)}
+
+def set_debug(enable: bool) -> dict:
+    result = _request_json("POST", "/debug", {"enabled": bool(enable)})
+    return result if isinstance(result, dict) else {"error": "Gateway unavailable"}
+
+
+def shutdown_gateway(force: bool = False, timeout: Optional[float] = None) -> dict:
+    """Request a graceful gateway shutdown via the internal control API."""
+    result = _request_json(
+        "POST",
+        "/shutdown",
+        {"force": bool(force)},
+        timeout=timeout,
+        ensure_server=False,
+    )
+    return result if isinstance(result, dict) else {"error": "Gateway unavailable"}
+
+
+def get_http_proxy_status() -> dict:
+    status = _request_json("GET", "/proxy_status", ensure_server=False)
+    merged = dict(_launch_status.get("http_proxy", {}))
+    if isinstance(status, dict):
+        merged.update(
+            {
+                "enabled": status.get("enabled", is_http_enabled()),
+                "alive": status.get("running", _http_proxy_alive()),
+                "url": status.get("url"),
+                "host": status.get("host"),
+                "port": status.get("port"),
+                "path": status.get("path"),
+                "last_error": status.get("last_error") or merged.get("last_error"),
+            }
+        )
+    else:
+        merged["alive"] = _http_proxy_alive()
+        merged.setdefault("enabled", is_http_enabled())
+    return merged
+
+
+def get_registry_server_status() -> dict:
+    status = dict(_launch_status.get("registry_server", {}))
+    status["alive"] = _gateway_ready()
+    return status
+
+
+def is_coordinator() -> bool:
+    """Compatibility shim: gateway is now always external to IDA."""
+    return False

@@ -8,13 +8,13 @@
 
 [wiki](https://github.com/jelasin/IDA-MCP/wiki) [deepwiki](https://deepwiki.com/jelasin/IDA-MCP)
 
-## IDA-MCP (FastMCP + Multi-instance Coordinator)
+## IDA-MCP (FastMCP + Multi-instance Gateway)
 
 * Each IDA instance starts its own **FastMCP Streamable HTTP** endpoint at `/mcp`
-* The first instance that wins `127.0.0.1:11337` becomes the internal **coordinator**, maintaining the in-memory registry and forwarding tool calls
-* The coordinator can also start the client-facing HTTP proxy on `127.0.0.1:11338` (configurable)
+* A standalone gateway daemon maintains the in-memory instance registry and forwards tool calls
+* The gateway serves both the internal API at `/internal` and the client-facing MCP proxy at `/mcp` on `127.0.0.1:11338` by default
 * The stdio proxy is a separate subprocess entrypoint that reuses the same proxy tool set
-* MCP Resources are exposed by each IDA instance directly, not by the coordinator/proxy
+* MCP Resources are exposed by each IDA instance directly, not by the gateway/proxy
 
 ## Architecture
 
@@ -44,8 +44,8 @@ The project uses a modular architecture:
 * **Decorator Chain Pattern**: `@tool` + `@idaread`/`@idawrite` for clean API definitions
 * **Batch Operations**: Most tools accept lists for batch processing
 * **MCP Resources**: REST-like `ida://` URI patterns for read-only data access on direct instance connections
-* **Multi-instance Support**: Coordinator on port 11337 manages multiple IDA instances
-* **HTTP-first Defaults**: The bundled config defaults to `enable_http=true` and `enable_stdio=false`
+* **Multi-instance Support**: A standalone gateway on port 11338 manages multiple IDA instances
+* **HTTP-first Defaults**: The bundled config defaults to `enable_http=true`, `enable_stdio=false`, and `enable_unsafe=true`
 * **IDA 8.x/9.x Compatible**: Compatibility layer handles API differences
 * **Hotkey Toggle**: `Shift-Alt-M` to start/stop MCP server
 * **Command Logging**: All MCP tool calls displayed in IDA Output window with args
@@ -152,7 +152,7 @@ The project uses a modular architecture:
 
 ```text
 IDA-MCP/
-  ida_mcp.py              # Plugin entry: start/stop per-instance HTTP MCP server + register coordinator
+  ida_mcp.py              # Plugin entry: start/stop per-instance HTTP MCP server + register with gateway
   ida_mcp/
     __init__.py           # Package initialization, auto-discovery, exports
     config.py             # Configuration loader (config.conf parser)
@@ -171,12 +171,12 @@ IDA-MCP/
     api_python.py         # Python execution API (unsafe)
     api_lifecycle.py      # Lifecycle API (shutdown/exit)
     api_resources.py      # MCP Resources
-    registry.py           # Coordinator / multi-instance registration
+    registry.py           # Gateway client helpers / multi-instance registration
     proxy/                # stdio-based MCP proxy
       __init__.py         # Proxy module exports
       ida_mcp_proxy.py    # Main entry point (stdio MCP server)
       api_lifecycle.py    # Proxy lifecycle API implementation
-      _http.py            # HTTP helpers for coordinator communication
+      _http.py            # HTTP helpers for gateway communication
       _state.py           # State management and port validation
       register_tools.py   # Consolidated forwarding tool registration
       http_server.py      # HTTP transport wrapper (reuses ida_mcp_proxy.server)
@@ -193,18 +193,22 @@ IDA-MCP/
 4. On startup, the instance:
    * selects a free instance port starting from `10000`
    * serves MCP over `http://127.0.0.1:<instance_port>/mcp/`
-   * registers with the coordinator on `127.0.0.1:11337`
-   * starts the HTTP proxy on `11338` only in the coordinator process, and only when HTTP proxying is enabled
+   * ensures the standalone gateway daemon is reachable on `127.0.0.1:11338`
+   * registers itself with the gateway's internal API at `http://127.0.0.1:11338/internal`
 5. Trigger the plugin again to stop the instance server and deregister it.
+
+Closing an IDA instance only deregisters that instance. The standalone gateway keeps running and can accept later instances.
 
 `open_in_ida` is a proxy-side lifecycle tool. It launches the IDA binary resolved from `IDA_PATH` or `config.conf` (`ida_path`), sets `IDA_MCP_AUTO_START=1`, and injects `-A` unless you already passed it in `extra_args`. This reduces prompts, but it does not guarantee that every IDA/loader/plugin dialog is suppressed.
 
+IDA-MCP is WSL-compatible. In a WSL environment, `open_in_ida` can launch a Windows IDA installation from Linux-side tooling, and it automatically converts the target file path into a Windows path before spawning IDA.
+
 ## Transport Overview
 
-There are three different endpoints in this project, and the distinction matters:
+There are two gateway-facing endpoints plus one per-instance endpoint in this project, and the distinction matters:
 
-* `127.0.0.1:11337` - internal coordinator HTTP API used for instance registry and tool forwarding
-* `127.0.0.1:11338/mcp` - client-facing HTTP MCP proxy, started by the coordinator when enabled
+* `127.0.0.1:11338/internal` - internal gateway HTTP API used for instance registry and tool forwarding
+* `127.0.0.1:11338/mcp` - client-facing HTTP MCP proxy exposed by the same standalone gateway process
 * `127.0.0.1:<instance_port>/mcp/` - direct MCP endpoint owned by one specific IDA instance
 
 The bundled `mcp.json` and the current default config are centered on the HTTP proxy on port `11338`.
@@ -215,7 +219,7 @@ The bundled `mcp.json` and the current default config are centered on the HTTP p
 
 | Mode | Description | Configuration |
 |------|-------------|---------------|
-| **HTTP proxy** (recommended) | Connects to the coordinator-owned MCP proxy on `11338` | Only requires `url` |
+| **HTTP proxy** (recommended) | Connects to the standalone gateway MCP proxy on `11338` | Only requires `url` |
 | **stdio proxy** | MCP client launches `ida_mcp/proxy/ida_mcp_proxy.py` as a subprocess | Requires `command` and `args` |
 | **Direct instance HTTP** | Connects straight to one IDA instance, mainly useful for `ida://` resources | Requires the selected instance port |
 
@@ -236,7 +240,7 @@ The bundled `mcp.json` and the current default config are centered on the HTTP p
 
 You can use it on Codex / Claude Code / LangChain / Cursor / VSCode / etc - any MCP client.
 
-Parameter schema is shared between the proxy and direct instance tools. For example, `rename_function` uses `address` on both sides and accepts either a symbol name or a numeric address.
+Parameter schema is shared between the proxy and direct instance tools. For example, `rename_function` uses `address` on both sides and accepts either a symbol name or a numeric address. For multi-instance usage, prefer passing `port` explicitly on proxy tools instead of relying on a process-wide selected instance.
 
 ### Configuration File
 
@@ -245,8 +249,9 @@ Edit `ida_mcp/config.conf` to customize settings:
 ```ini
 enable_stdio = false
 enable_http = true
+enable_unsafe = true
 
-# coordinator_port = 11337
+# coordinator_port = 11337  # legacy compatibility key; internal API now shares http_port
 
 # HTTP proxy settings
 # http_host = "127.0.0.1"
@@ -264,14 +269,16 @@ enable_http = true
 
 Notes:
 
-* The coordinator host and direct instance host are fixed to `127.0.0.1` in code.
+* The gateway host and direct instance host are fixed to `127.0.0.1` for client connections in code.
 * `IDA_PATH` overrides `ida_path` from `config.conf`.
+* `IDA_MCP_ENABLE_UNSAFE=1|0` overrides `enable_unsafe` from `config.conf`.
 * `open_in_ida` no longer accepts an `ida_path` tool argument; configure the IDA executable through `IDA_PATH` or `config.conf`.
-* If both `enable_stdio` and `enable_http` are disabled, the plugin will not start the coordinator/transport stack.
+* WSL is supported: you can run the tooling inside WSL and still launch a Windows IDA binary through `open_in_ida`.
+* If both `enable_stdio` and `enable_http` are disabled, the plugin will not start the gateway/transport stack.
 
 ### Method 1: HTTP Proxy Mode (Recommended)
 
-When a coordinator is running and HTTP proxying is enabled, the client only needs the proxy URL.
+When the standalone gateway is running and HTTP proxying is enabled, the client only needs the proxy URL.
 
 **Claude / Cherry Studio / Cursor example:**
 
@@ -312,7 +319,7 @@ When a coordinator is running and HTTP proxying is enabled, the client only need
 
 ### Method 2: stdio Proxy Mode
 
-The client launches the proxy as a subprocess. This proxy talks to the coordinator on `11337` and exposes the same proxy-side tools as HTTP mode.
+The client launches the proxy as a subprocess. This proxy talks to the standalone gateway on `11338` and exposes the same proxy-side tools as HTTP mode.
 
 **Claude / Cherry Studio / Cursor example:**
 
