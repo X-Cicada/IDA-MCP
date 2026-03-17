@@ -1,7 +1,7 @@
-"""IDA-MCP CPU Diagnostic Script.
+﻿"""IDA-MCP CPU Diagnostic Script.
 
 Run inside the IDA Python console:
-    exec(open(r"D:\\workspace\\project\\pc\\IDA-MCP\\diag_cpu.py").read())
+    exec(open(r"D:\\workspace\\project\\pc\\IDA-MCP\\test\\diag_cpu.py").read())
 
 It measures per-thread CPU consumption over a short interval so we can
 identify whether idle CPU comes from MCP threads or IDA itself.
@@ -149,3 +149,5 @@ def measure_cpu(duration_sec=5):
 
 
 measure_cpu(5)
+
+
