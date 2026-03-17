@@ -47,11 +47,6 @@ The project uses a modular architecture:
 * **Multi-instance Support**: A standalone gateway on port 11338 manages multiple IDA instances
 * **HTTP-first Defaults**: The bundled config defaults to `enable_http=true`, `enable_stdio=false`, and `enable_unsafe=true`
 * **IDA 8.x/9.x Compatible**: Compatibility layer handles API differences
-* **Hotkey Toggle**: `Shift-Alt-M` to start/stop MCP server
-* **Command Logging**: All MCP tool calls displayed in IDA Output window with args
-* **Readiness Check**: Auto-rejects requests while IDA autoanalysis is running
-* **Long Session Support**: 24h keep-alive, safe to leave running all day
-* **Zero Idle CPU**: Event-driven server replaces uvicorn polling — 0% CPU when no requests
 
 ## Current Tools
 
