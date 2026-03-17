@@ -12,37 +12,143 @@ from ._server import server
 
 
 class _SessionStickyMiddleware:
-    """Reuse the same MCP session across concurrent HTTP requests."""
+    """Reuse the same MCP session across concurrent HTTP requests.
+
+    If a cached or client-provided session becomes stale, retry once without
+    the session header so FastMCP can issue a fresh session.
+    """
+
+    _SESSION_HEADER = b"mcp-session-id"
+    _SESSION_NOT_FOUND_MARKER = b"session not found"
 
     def __init__(self, app):
         self.app = app
         self._session_id: Optional[str] = None
+        self._session_lock = threading.Lock()
+
+    def _get_cached_session_id(self) -> Optional[str]:
+        with self._session_lock:
+            return self._session_id
+
+    def _clear_cached_session(self) -> None:
+        with self._session_lock:
+            self._session_id = None
+
+    def _store_response_session(self, session_id: Optional[str], status_code: int) -> None:
+        with self._session_lock:
+            if status_code >= 400:
+                self._session_id = None
+            elif session_id is not None:
+                self._session_id = session_id
+
+    @classmethod
+    def _has_session_header(cls, headers) -> bool:
+        return any(key.lower() == cls._SESSION_HEADER for key, _ in headers)
+
+    @classmethod
+    def _strip_session_headers(cls, headers):
+        return [(key, value) for key, value in headers if key.lower() != cls._SESSION_HEADER]
+
+    @classmethod
+    def _extract_response_session_id(cls, message) -> Optional[str]:
+        for key, value in message.get("headers", []):
+            if key.lower() == cls._SESSION_HEADER:
+                return value.decode("ascii")
+        return None
+
+    @classmethod
+    def _is_session_not_found(cls, status_code: int, body_chunks: list[bytes]) -> bool:
+        if status_code != 404:
+            return False
+        return cls._SESSION_NOT_FOUND_MARKER in b"".join(body_chunks).lower()
+
+    @staticmethod
+    async def _buffer_request(receive):
+        messages = []
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message.get("type") == "http.disconnect":
+                break
+            if message.get("type") == "http.request" and not message.get("more_body", False):
+                break
+        return messages
+
+    @staticmethod
+    def _make_replay_receive(messages, fallback_receive):
+        replay_messages = [dict(message) for message in messages]
+        index = 0
+
+        async def _receive():
+            nonlocal index
+            if index < len(replay_messages):
+                message = replay_messages[index]
+                index += 1
+                return message
+            return await fallback_receive()
+
+        return _receive
+
+    def _scope_with_cached_session(self, scope):
+        raw_headers = list(scope.get("headers", []))
+        cached_session = self._get_cached_session_id()
+        if not self._has_session_header(raw_headers) and cached_session is not None:
+            raw_headers.append((self._SESSION_HEADER, cached_session.encode("ascii")))
+            return {**scope, "headers": raw_headers}
+        return scope
+
+    async def _dispatch(self, scope, request_messages, receive, send, allow_retry: bool) -> None:
+        status_code = 0
+        response_session_id: Optional[str] = None
+        delay_response = False
+        pending_messages = []
+        body_chunks: list[bytes] = []
+
+        async def _capture_send(message):
+            nonlocal status_code, response_session_id, delay_response
+
+            if message.get("type") == "http.response.start":
+                status_code = int(message.get("status") or 0)
+                response_session_id = self._extract_response_session_id(message)
+                delay_response = status_code == 404
+                if delay_response:
+                    pending_messages.append(message)
+                    return
+
+                self._store_response_session(response_session_id, status_code)
+                await send(message)
+                return
+
+            if delay_response:
+                pending_messages.append(message)
+                if message.get("type") == "http.response.body":
+                    body_chunks.append(message.get("body", b""))
+                return
+
+            await send(message)
+
+        await self.app(scope, self._make_replay_receive(request_messages, receive), _capture_send)
+
+        if not delay_response:
+            return
+
+        if allow_retry and self._is_session_not_found(status_code, body_chunks):
+            self._clear_cached_session()
+            retry_scope = {**scope, "headers": self._strip_session_headers(scope.get("headers", []))}
+            await self._dispatch(retry_scope, request_messages, receive, send, allow_retry=False)
+            return
+
+        self._store_response_session(response_session_id, status_code)
+        for message in pending_messages:
+            await send(message)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        raw_headers = list(scope.get("headers", []))
-        has_session = any(key.lower() == b"mcp-session-id" for key, _ in raw_headers)
-
-        if not has_session and self._session_id is not None:
-            raw_headers.append((b"mcp-session-id", self._session_id.encode("ascii")))
-            scope = {**scope, "headers": raw_headers}
-
-        middleware_self = self
-
-        async def _capture_send(message):
-            if message.get("type") == "http.response.start":
-                for key, value in message.get("headers", []):
-                    if key.lower() == b"mcp-session-id":
-                        middleware_self._session_id = value.decode("ascii")
-                        break
-                if int(message.get("status") or 0) >= 400:
-                    middleware_self._session_id = None
-            await send(message)
-
-        await self.app(scope, receive, _capture_send)
+        request_messages = await self._buffer_request(receive)
+        await self._dispatch(self._scope_with_cached_session(scope), request_messages, receive, send, allow_retry=True)
 
 
 _http_thread: Optional[threading.Thread] = None
