@@ -95,7 +95,11 @@ _API_CATEGORIES = {
     # MemoryAnalysis
     "decompile": "analysis",
     "disasm": "analysis",
-    "linear_disassemble": "analysis",
+    "linear_disasm": "analysis",
+    "get_callers": "analysis",
+    "get_callees": "analysis",
+    "get_function_signature": "analysis",
+    "get_pseudocode_lines": "analysis",
     "xrefs_to": "analysis",
     "xrefs_from": "analysis",
     "xrefs_to_field": "analysis",
@@ -104,10 +108,7 @@ _API_CATEGORIES = {
     
     # Memory
     "get_bytes": "memory",
-    "get_u8": "memory",
-    "get_u16": "memory",
-    "get_u32": "memory",
-    "get_u64": "memory",
+    "read_scalar": "memory",
     "get_string": "memory",
     
     # Modify
@@ -116,9 +117,17 @@ _API_CATEGORIES = {
     "rename_local_variable": "modify",
     "rename_global_variable": "modify",
     "patch_bytes": "modify",
+    "create_function": "modeling",
+    "delete_function": "modeling",
+    "make_code": "modeling",
+    "undefine_items": "modeling",
+    "make_data": "modeling",
+    "make_string": "modeling",
     
     # Types
-    "declare_type": "types",
+    "declare_struct": "types",
+    "declare_enum": "types",
+    "declare_typedef": "types",
     "set_function_prototype": "types",
     "set_local_variable_type": "types",
     "set_global_variable_type": "types",
@@ -156,9 +165,9 @@ _PROXY_ONLY_TOOLS = {
 def _call_proxy_only_tool_locally(tool_name: str, params: dict) -> Any:
     """Execute proxy-only lifecycle tools locally for stdio-mode test coverage."""
     if tool_name == "open_in_ida":
-        from ida_mcp.proxy import api_lifecycle
+        from ida_mcp.proxy import lifecycle
 
-        return api_lifecycle.open_in_ida(
+        return lifecycle.open_in_ida(
             params.get("file_path", ""),
             extra_args=params.get("extra_args"),
         )
@@ -170,6 +179,8 @@ def _is_proxy_transport_error(result: Any) -> bool:
     if not isinstance(result, dict):
         return False
     error = result.get("error")
+    if isinstance(error, dict):
+        error = error.get("message", "")
     if not isinstance(error, str):
         return False
     return (

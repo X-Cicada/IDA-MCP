@@ -208,6 +208,18 @@ class TestEntryPoints:
         assert "items" in result
 
 
+class TestConvertNumber:
+    """数字转换测试。"""
+
+    def test_convert_number(self, tool_caller):
+        result = tool_caller("convert_number", {"text": "401000h", "size": 32})
+
+        assert isinstance(result, dict)
+        assert "error" not in result
+        assert result["hex"] == "0x00401000"
+        assert result["unsigned"] == 0x401000
+
+
 
 
 class TestImports:

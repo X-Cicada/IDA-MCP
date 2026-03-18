@@ -32,6 +32,7 @@ The project uses a modular architecture:
 * `api_core.py` - IDB metadata, function/string/global lists
 * `api_analysis.py` - Decompilation, disassembly, cross-references
 * `api_memory.py` - Memory reading operations
+* `api_modeling.py` - Database shaping (functions, code/data/string creation)
 * `api_types.py` - Type operations (prototypes, local types)
 * `api_modify.py` - Comments, renaming
 * `api_stack.py` - Stack frame operations
@@ -52,8 +53,8 @@ The project uses a modular architecture:
 
 ### Core Tools (`api_core.py`)
 
-* `check_connection` – Health check (ok/count)
-* `list_instances` – List all registered IDA instances
+* `check_connection` – Gateway/registry health check (ok/count)
+* `list_instances` – List all IDA instances registered in the shared gateway
 * `get_metadata` – IDB metadata (hash/arch/bits/endian)
 * `list_functions` – Paginated function list with optional pattern filter
 * `get_function` – Find function by name or address
@@ -71,7 +72,11 @@ The project uses a modular architecture:
 
 * `decompile` – Batch decompile functions (Hex-Rays)
 * `disasm` – Batch disassemble functions
-* `linear_disassemble` – Linear disassembly from arbitrary address
+* `linear_disasm` – Linear disassembly from arbitrary address
+* `get_callers` – Structured caller summary grouped by function and call site
+* `get_callees` – Structured callee summary grouped by function and call site
+* `get_function_signature` – Best-available function signature string
+* `get_pseudocode_lines` – Structured pseudocode lines for a function
 * `xrefs_to` – Batch cross-references to addresses
 * `xrefs_from` – Batch cross-references from addresses
 * `xrefs_to_field` – Heuristic struct field references
@@ -81,12 +86,23 @@ The project uses a modular architecture:
 ### Memory Tools (`api_memory.py`)
 
 * `get_bytes` – Read raw bytes
-* `get_u8` / `get_u16` / `get_u32` / `get_u64` – Read integers
+* `read_scalar` – Read integers with explicit width
 * `get_string` – Read null-terminated strings
+
+### Modeling Tools (`api_modeling.py`)
+
+* `create_function` – Create a function at an address
+* `delete_function` – Delete an existing function
+* `make_code` – Convert bytes at an address into code
+* `undefine_items` – Undefine a byte range
+* `make_data` – Create typed data items
+* `make_string` – Create a string literal
 
 ### Type Tools (`api_types.py`)
 
-* `declare_type` – Create/update local types
+* `declare_struct` – Create/update local structs
+* `declare_enum` – Create/update local enums
+* `declare_typedef` – Create/update local typedefs
 * `set_function_prototype` – Set function signature
 * `set_local_variable_type` – Set local variable type (Hex-Rays)
 * `set_global_variable_type` – Set global variable type
@@ -109,7 +125,7 @@ The project uses a modular architecture:
 
 ### Python Tools (`api_python.py`) - Unsafe
 
-* `py_eval` – Execute Python code in IDA context and return `result` / `stdout` / `stderr`
+* `py_eval` – Execute arbitrary Python code in IDA context and return `result` / `stdout` / `stderr`
 
 ### Debug Tools (`api_debug.py`) - Unsafe
 
@@ -131,16 +147,24 @@ The project uses a modular architecture:
 ### MCP Resources (`api_resources.py`)
 
 * `ida://idb/metadata` – IDB metadata
-* `ida://functions` / `ida://functions/{pattern}` – Functions
+* `ida://functions` – Function list
 * `ida://function/{addr}` – Single function details
-* `ida://strings` / `ida://strings/{pattern}` – Strings
-* `ida://globals` / `ida://globals/{pattern}` – Global symbols
-* `ida://types` / `ida://types/{pattern}` – Local types
-* `ida://segments` – Segment list
-* `ida://imports` – Import list
+* `ida://function/{addr}/decompile` – Function decompilation snapshot
+* `ida://function/{addr}/disasm` – Function disassembly snapshot
+* `ida://function/{addr}/basic_blocks` – Function CFG/basic block view
+* `ida://function/{addr}/stack` – Function stack/local-variable view
+* `ida://strings` – Strings
+* `ida://globals` – Global symbols
+* `ida://types` – Local types
+* `ida://segments` / `ida://segment/{name_or_addr}` – Segment list and detail
+* `ida://imports` / `ida://imports/{module}` – Imports list and per-module view
 * `ida://exports` – Export list
+* `ida://entry_points` – Entry points
+* `ida://structs` / `ida://struct/{name}` – Struct list and detail
 * `ida://xrefs/to/{addr}` – Cross-references to address
+* `ida://xrefs/to/{addr}/summary` – Aggregated incoming xref summary
 * `ida://xrefs/from/{addr}` – Cross-references from address
+* `ida://xrefs/from/{addr}/summary` – Aggregated outgoing xref summary
 * `ida://memory/{addr}?size=N` – Read memory
 
 ## Directory Structure
@@ -159,23 +183,25 @@ IDA-MCP/
     api_core.py           # Core API (metadata, lists)
     api_analysis.py       # Analysis API (decompile, disasm, xrefs)
     api_memory.py         # Memory API
+    api_modeling.py       # Modeling API (functions, code/data/string creation)
     api_types.py          # Type API
     api_modify.py         # Modification API
     api_stack.py          # Stack frame API
     api_debug.py          # Debugger API (unsafe)
     api_python.py         # Python execution API (unsafe)
-    api_lifecycle.py      # Lifecycle API (shutdown/exit)
+    api_lifecycle.py      # IDA-instance lifecycle API (shutdown/exit)
     api_resources.py      # MCP Resources
     registry.py           # Gateway client helpers / multi-instance registration
     proxy/                # stdio-based MCP proxy
       __init__.py         # Proxy module exports
       ida_mcp_proxy.py    # Main entry point (stdio MCP server)
-      api_lifecycle.py    # Proxy lifecycle API implementation
+      lifecycle.py        # Proxy-side lifecycle operations
       _http.py            # HTTP helpers for gateway communication
       _state.py           # State management and port validation
       register_tools.py   # Consolidated forwarding tool registration
       http_server.py      # HTTP transport wrapper (reuses ida_mcp_proxy.server)
   mcp.json                # MCP client configuration (both modes)
+  roadmap.md              # Phased plan for reducing py_eval dependence
   README.md               # README
   requirements.txt        # fastmcp dependencies
 ```
@@ -194,7 +220,7 @@ IDA-MCP/
 
 Closing an IDA instance only deregisters that instance. The standalone gateway keeps running and can accept later instances.
 
-`open_in_ida` is a proxy-side lifecycle tool. It launches the IDA binary resolved from `IDA_PATH` or `config.conf` (`ida_path`), sets `IDA_MCP_AUTO_START=1`, and injects `-A` unless you already passed it in `extra_args`. This reduces prompts, but it does not guarantee that every IDA/loader/plugin dialog is suppressed.
+`open_in_ida` is a proxy-side lifecycle tool. It launches the IDA binary resolved from `IDA_PATH` or `config.conf` (`ida_path`) and sets `IDA_MCP_AUTO_START=1` so the plugin comes up automatically. It keeps IDA in normal interactive GUI mode by default; if you want batch/autonomous startup, pass `-A` explicitly in `extra_args`.
 
 IDA-MCP is WSL-compatible. In a WSL environment, `open_in_ida` can launch a Windows IDA installation from Linux-side tooling, and it automatically converts the target file path into a Windows path before spawning IDA.
 
@@ -223,12 +249,13 @@ The bundled `mcp.json` and the current default config are centered on the HTTP p
 | Category | Tools |
 |----------|-------|
 | Management | `check_connection`, `list_instances`, `select_instance` |
-| Lifecycle | `open_in_ida`, `close_ida` |
-| Core | `list_functions`, `get_metadata`, `list_strings`, `list_globals`, `list_local_types`, `get_entry_points`, `get_function`, `list_imports`, `list_exports`, `list_segments`, `get_cursor` |
-| Analysis | `decompile`, `disasm`, `linear_disassemble`, `xrefs_to`, `xrefs_from`, `xrefs_to_field`, `find_bytes`, `get_basic_blocks` |
+| Lifecycle | `open_in_ida`, `close_ida`, `shutdown_gateway` |
+| Core | `list_functions`, `get_metadata`, `list_strings`, `list_globals`, `list_local_types`, `get_entry_points`, `convert_number`, `get_function`, `list_imports`, `list_exports`, `list_segments`, `get_cursor` |
+| Analysis | `decompile`, `disasm`, `linear_disasm`, `get_callers`, `get_callees`, `get_function_signature`, `get_pseudocode_lines`, `xrefs_to`, `xrefs_from`, `xrefs_to_field`, `find_bytes`, `get_basic_blocks` |
+| Modeling | `create_function`, `delete_function`, `make_code`, `undefine_items`, `make_data`, `make_string` |
 | Modify | `set_comment`, `rename_function`, `rename_global_variable`, `rename_local_variable`, `patch_bytes` |
-| Memory | `get_bytes`, `get_u8`, `get_u16`, `get_u32`, `get_u64`, `get_string` |
-| Types | `set_function_prototype`, `set_local_variable_type`, `set_global_variable_type`, `declare_type`, `list_structs`, `get_struct_info` |
+| Memory | `get_bytes`, `read_scalar`, `get_string` |
+| Types | `set_function_prototype`, `set_local_variable_type`, `set_global_variable_type`, `declare_struct`, `declare_enum`, `declare_typedef`, `list_structs`, `get_struct_info` |
 | Stack | `stack_frame`, `declare_stack`, `delete_stack` |
 | Python | `py_eval` |
 | Debug | `dbg_start`, `dbg_continue`, `dbg_step_into`, `dbg_step_over`, `dbg_regs`, `dbg_add_bp`, `dbg_delete_bp`, ... |
@@ -349,7 +376,14 @@ The client launches the proxy as a subprocess. This proxy talks to the standalon
 * `list_resources` / `read_resource` must connect to `http://127.0.0.1:<instance_port>/mcp/`
 * the HTTP proxy on `11338` forwards tools, but does not forward resources
 * resource payloads are returned as JSON text content, so MCP clients typically need to parse the resource text as JSON
-* resources are read-only and currently cover a subset of the read surface, not every tool-equivalent API
+* resources are read-only and cover stable context views, not the full tool surface
+
+Resource payload conventions:
+
+* list resources return JSON objects shaped like `{kind, count, items}`
+* detail resources return JSON objects shaped like `{kind, address|name, ...}`
+* resource errors return `{error: {code, message, details?}}`
+* the old pattern-style resource URIs such as `ida://functions/{pattern}` were removed in favor of canonical list/detail URIs
 
 Typical flow:
 
@@ -373,6 +407,24 @@ The installer:
 * interactively generates the destination `ida_mcp/config.conf`
 
 Use `python install.py --dry-run` to verify detection and configuration choices without making changes.
+
+## Command Helper
+
+Use `command.py` for local control, scripting, and CI-friendly access:
+
+```bash
+python command.py gateway start
+python command.py gateway restart
+python command.py gateway status
+python command.py ida list
+python command.py ida open ./test/samples/simple.exe
+python command.py ida select --port 10000
+python command.py tool call get_metadata --port 10000
+python command.py resource read ida://functions --port 10000
+python command.py gateway stop --force
+```
+
+Add `--json` to any command when you need machine-readable output. Human-readable output is the default.
 
 ## Dependencies
 

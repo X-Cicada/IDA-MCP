@@ -2,7 +2,7 @@
 
 提供工具:
     - get_bytes          读取原始字节
-    - get_u8/u16/u32/u64 读取整数
+    - read_scalar        读取标量整数
     - get_string         读取字符串
 """
 from __future__ import annotations
@@ -67,7 +67,6 @@ def get_bytes(
                 "size": len(byte_list),
                 "bytes": byte_list,
                 "hex": hex_str,
-                "error": None,
             })
         except Exception as e:
             results.append({"error": str(e), "query": query, "address": hex_addr(address)})
@@ -76,62 +75,42 @@ def get_bytes(
 
 
 # ============================================================================
-# 整数读取
+# 标量读取
 # ============================================================================
 
 @tool
 @idaread
-def get_u8(
+def read_scalar(
     addr: Annotated[Union[int, str], "Address(es) - single or comma-separated"],
+    width: Annotated[int, "Scalar width in bytes: 1, 2, 4, or 8"] = 4,
+    signed: Annotated[bool, "Whether to decode as signed integer"] = False,
 ) -> List[dict]:
-    """Read 8-bit unsigned integer(s)."""
-    return _read_int(addr, 1, signed=False)
-
-
-@tool
-@idaread
-def get_u16(
-    addr: Annotated[Union[int, str], "Address(es) - single or comma-separated"],
-) -> List[dict]:
-    """Read 16-bit unsigned integer(s)."""
-    return _read_int(addr, 2, signed=False)
-
-
-@tool
-@idaread
-def get_u32(
-    addr: Annotated[Union[int, str], "Address(es) - single or comma-separated"],
-) -> List[dict]:
-    """Read 32-bit unsigned integer(s)."""
-    return _read_int(addr, 4, signed=False)
-
-
-@tool
-@idaread
-def get_u64(
-    addr: Annotated[Union[int, str], "Address(es) - single or comma-separated"],
-) -> List[dict]:
-    """Read 64-bit unsigned integer(s)."""
-    return _read_int(addr, 8, signed=False)
+    """Read scalar integer(s) with explicit width."""
+    return _read_scalar(addr, width, signed=signed)
 
 
 def _get_byteorder() -> str:
-    """获取 IDB 端序 (little / big)。"""
+    """Get IDB endianness (little / big) with IDA 8.x/9.x fallback."""
     try:
         import ida_ida  # type: ignore
-        return 'big' if ida_ida.inf_is_be() else 'little'
+
+        return "big" if ida_ida.inf_is_be() else "little"
     except Exception:
         try:
             inf = idaapi.get_inf_structure()  # type: ignore
-            return 'big' if inf.is_be() else 'little'
+            if hasattr(inf, "is_be") and inf.is_be():
+                return "big"
         except Exception:
-            return 'little'
+            pass
+    return "little"
 
 
-def _read_int(addr: Union[int, str], size: int, signed: bool = False) -> List[dict]:
-    """内部: 读取整数。"""
+def _read_scalar(addr: Union[int, str], width: int, signed: bool = False) -> List[dict]:
+    """内部: 读取标量整数。"""
+    if width not in (1, 2, 4, 8):
+        return [{"error": "width must be one of 1, 2, 4, or 8", "width": width}]
+
     queries = normalize_list_input(addr)
-    byteorder = _get_byteorder()
     results = []
     
     for query in queries:
@@ -142,19 +121,23 @@ def _read_int(addr: Union[int, str], size: int, signed: bool = False) -> List[di
         
         address = parsed["value"]
         try:
-            data = idaapi.get_bytes(address, size)
+            data = idaapi.get_bytes(address, width)
             if data is None:
                 results.append({"error": "failed to read", "query": query, "address": hex_addr(address)})
                 continue
             
-            value = int.from_bytes(data, byteorder=byteorder, signed=signed)
+            endian = _get_byteorder()
+            unsigned_value = int.from_bytes(data, byteorder=endian, signed=False)
+            value = int.from_bytes(data, byteorder=endian, signed=signed)
             
             results.append({
                 "query": query,
                 "address": hex_addr(address),
+                "width": width,
+                "signed": bool(signed),
                 "value": value,
-                "hex": f"0x{value:0{size*2}X}",
-                "error": None,
+                "unsigned": unsigned_value,
+                "hex": f"0x{unsigned_value:0{width*2}X}",
             })
         except Exception as e:
             results.append({"error": str(e), "query": query, "address": hex_addr(address)})
@@ -214,11 +197,8 @@ def get_string(
                 "address": hex_addr(address),
                 "length": len(data),
                 "text": text,
-                "error": None,
             })
         except Exception as e:
             results.append({"error": str(e), "query": query, "address": hex_addr(address)})
     
     return results
-
-

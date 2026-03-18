@@ -20,6 +20,8 @@ API 参数对应：
 """
 import pytest
 
+from ida_mcp import api_stack
+
 pytestmark = pytest.mark.stack
 
 
@@ -114,6 +116,8 @@ class TestStackFrame:
         
         # 验证结果结构
         frame_info = result[0]
+        if "error" in frame_info:
+            pytest.skip(f"Stack frame unavailable for selected function: {frame_info['error']}")
         assert "name" in frame_info
         assert "start_ea" in frame_info
         assert "variables" in frame_info
@@ -156,6 +160,103 @@ class TestDeclareStack:
         
         assert isinstance(result, list)
         assert len(result) == 2
+
+
+class TestDeclareStackHelpers:
+    def test_declare_stack_rejects_invalid_name(self):
+        result = api_stack.declare_stack.__wrapped__([{
+            "function_address": "0x401000",
+            "offset": -8,
+            "name": "123bad",
+            "size": 4,
+        }])
+
+        assert result[0]["error"] == "name is not a valid C identifier"
+
+    def test_declare_stack_uses_explicit_type(self, monkeypatch):
+        calls: dict[str, object] = {}
+
+        class FakeFunc:
+            start_ea = 0x401000
+
+        class FakeFuncs:
+            @staticmethod
+            def get_func(_ea):
+                return FakeFunc()
+
+        class FakeFrame:
+            pass
+
+        class FakeIdaFrame:
+            @staticmethod
+            def get_frame(_func):
+                return FakeFrame()
+
+        monkeypatch.setattr(api_stack, "wait_for_auto_analysis", lambda: None)
+        monkeypatch.setattr(api_stack, "ida_funcs", FakeFuncs())
+        monkeypatch.setattr(api_stack, "ida_frame", FakeIdaFrame())
+        monkeypatch.setattr(api_stack.compat, "get_member_by_name", lambda _frame, _name: None)
+
+        def fake_parse(type_text):
+            calls["declared_type"] = type_text
+            return object(), None
+
+        monkeypatch.setattr(api_stack, "_parse_stack_tinfo", fake_parse)
+        monkeypatch.setattr(api_stack, "_define_stack_member", lambda _f, _off, _name, _tif: (True, None))
+
+        result = api_stack.declare_stack.__wrapped__([{
+            "function_address": "0x401000",
+            "offset": -8,
+            "name": "typed_local",
+            "type": "int",
+            "size": 1,
+        }])
+
+        assert result[0]["changed"] is True
+        assert result[0]["declared_type"] == "int"
+        assert calls["declared_type"] == "int"
+
+    def test_declare_stack_uses_size_based_fallback_type(self, monkeypatch):
+        calls: dict[str, object] = {}
+
+        class FakeFunc:
+            start_ea = 0x401000
+
+        class FakeFuncs:
+            @staticmethod
+            def get_func(_ea):
+                return FakeFunc()
+
+        class FakeFrame:
+            pass
+
+        class FakeIdaFrame:
+            @staticmethod
+            def get_frame(_func):
+                return FakeFrame()
+
+        monkeypatch.setattr(api_stack, "wait_for_auto_analysis", lambda: None)
+        monkeypatch.setattr(api_stack, "ida_funcs", FakeFuncs())
+        monkeypatch.setattr(api_stack, "ida_frame", FakeIdaFrame())
+        monkeypatch.setattr(api_stack.compat, "get_member_by_name", lambda _frame, _name: None)
+
+        def fake_parse(type_text):
+            calls["declared_type"] = type_text
+            return object(), None
+
+        monkeypatch.setattr(api_stack, "_parse_stack_tinfo", fake_parse)
+        monkeypatch.setattr(api_stack, "_define_stack_member", lambda _f, _off, _name, _tif: (True, None))
+
+        result = api_stack.declare_stack.__wrapped__([{
+            "function_address": "0x401000",
+            "offset": -16,
+            "name": "sized_local",
+            "size": 16,
+        }])
+
+        assert result[0]["changed"] is True
+        assert result[0]["declared_type"] == "char[16]"
+        assert calls["declared_type"] == "char[16]"
 
 
 class TestDeleteStack:

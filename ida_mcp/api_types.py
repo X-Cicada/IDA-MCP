@@ -1,7 +1,9 @@
 """类型 API - 类型操作。
 
 提供工具:
-    - declare_type         声明/更新类型
+    - declare_struct       声明/更新结构体
+    - declare_enum         声明/更新枚举
+    - declare_typedef      声明/更新 typedef
     - set_function_prototype  设置函数原型
     - set_local_variable_type 设置局部变量类型
     - set_global_variable_type 设置全局变量类型
@@ -10,6 +12,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Annotated, Optional, List, Dict, Any, Union
 
 from .compat import get_idati as _get_idati
@@ -70,7 +73,7 @@ def _parse_decls_python(decls: str, hti_flags: int) -> tuple:
     try:
         # ida_typeinf.parse_decls(til, input, printer, hti_flags)
         # 使用默认类型库
-        errors = ida_typeinf.parse_decls(ida_typeinf.get_idati(), decls, False, hti_flags)
+        errors = ida_typeinf.parse_decls(_get_idati(), decls, False, hti_flags)
         return (errors, [])
     except Exception as e:
         return (-1, [str(e)])
@@ -80,52 +83,16 @@ def _parse_decls_python(decls: str, hti_flags: int) -> tuple:
 # 类型声明
 # ============================================================================
 
-@tool
-@idawrite
-def declare_type(
-    decl: Annotated[str, "C type declaration (struct/union/enum/typedef)"],
-) -> dict:
-    """Declare C type(s) in the local type library."""
-    if not decl or not decl.strip():
-        return {"error": "empty declaration"}
-    
-    decl_text = decl.strip()
-    
-    # 使用 parse_decls 直接解析并添加到类型库
-    # 这比 parse_decl + set_named_type 更可靠
-    hti_flags = PT_SIL | PT_TYP | PT_EMPTY
-    
-    # 只使用 IDAPython API，避免 ctypes/native parse_decls 在 Windows 上
-    # 把 IDA UI 主线程长时间阻塞。
-    errors, messages = _parse_decls_python(decl_text, hti_flags)
-    
-    if errors > 0:
-        return {
-            "error": f"parse failed ({errors} errors)",
-            "details": messages[:5] if messages else [],
-        }
-    elif errors < 0:
-        # 两种方法都失败，回退到旧方法
-        return _declare_type_fallback(decl_text)
-    
-    return {
-        "decl": decl_text,
-        "ok": True,
-        "messages": messages[:5] if messages else None,
-    }
-
-
-def _declare_type_fallback(decl_text: str) -> dict:
-    """declare_type 的回退实现 (使用 parse_decl + set_named_type)。"""
+def _parse_decl_tinfo(decl_text: str) -> tuple[Any, Optional[str], list[str]]:
     tinfo = ida_typeinf.tinfo_t()
     name = None
     parse_errors: List[str] = []
-    
+
     variants = [
         ("idaapi.parse_decl", lambda: idaapi.parse_decl(tinfo, _get_idati(), decl_text, PT_SIL)),  # type: ignore
         ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tinfo, _get_idati(), decl_text, PT_SIL)),  # type: ignore
     ]
-    
+
     for label, fn in variants:
         try:
             nm = fn()
@@ -137,22 +104,36 @@ def _declare_type_fallback(decl_text: str) -> dict:
                 break
         except Exception as e:
             parse_errors.append(f"{label}: {e}")
-    
-    if not name or not tinfo or tinfo.empty():
-        return {"error": "parse failed", "details": parse_errors[:2]}
-    
-    # 检查是否已存在
-    existed = False
+
+    return tinfo, name, parse_errors
+
+
+def _kind_from_tinfo(tinfo: Any) -> str:
     try:
-        existed = bool(ida_typeinf.get_named_type(_get_idati(), name, 0))  # type: ignore
+        if tinfo.is_struct():
+            return "struct"
+        if tinfo.is_enum():
+            return "enum"
+        if tinfo.is_typedef():
+            return "typedef"
+        if tinfo.is_union():
+            return "union"
     except Exception:
-        existed = False
-    
-    # 设置类型 - 尝试多种方法
+        pass
+    return "other"
+
+
+def _named_type_exists(name: str) -> bool:
+    try:
+        return bool(ida_typeinf.get_named_type(_get_idati(), name, 0))  # type: ignore
+    except Exception:
+        return False
+
+
+def _apply_named_type(name: str, tinfo: Any, existed: bool) -> tuple[bool, List[str]]:
     ok = False
     set_errors: List[str] = []
-    
-    # 方法 1: set_named_type
+
     try:
         flags = getattr(ida_typeinf, 'NTF_REPLACE', 0) if existed else 0
         ok = bool(ida_typeinf.set_named_type(_get_idati(), name, flags, tinfo, 0))  # type: ignore
@@ -169,29 +150,119 @@ def _declare_type_fallback(decl_text: str) -> dict:
             pass
         except Exception as e:
             set_errors.append(f"tinfo.set_named_type: {e}")
-    
-    if not ok:
-        return {"error": "set type failed", "details": set_errors[:2]}
-    
-    kind = "other"
+
+    return bool(ok), set_errors
+
+
+def _load_named_type(name: str) -> Any:
     try:
-        if tinfo.is_struct():
-            kind = "struct"
-        elif tinfo.is_union():
-            kind = "union"
-        elif tinfo.is_enum():
-            kind = "enum"
-        elif tinfo.is_typedef():
-            kind = "typedef"
+        tif = ida_typeinf.tinfo_t()
+        if tif.get_named_type(_get_idati(), name):
+            return tif
     except Exception:
         pass
-    
+    return None
+
+
+def _extract_decl_name(decl_text: str, expected_kind: str, parsed_name: Optional[str]) -> Optional[str]:
+    patterns = {
+        "struct": r"^\s*struct\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+        "enum": r"^\s*enum\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+        "typedef": r"^\s*typedef\b[\s\S]*?\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]+\])?\s*;\s*$",
+    }
+    pattern = patterns.get(expected_kind)
+    if pattern:
+        match = re.match(pattern, decl_text.strip(), re.DOTALL)
+        if match:
+            return match.group(1)
+
+    if parsed_name and is_valid_c_identifier(parsed_name):
+        return parsed_name
+    return None
+
+
+def _declare_named_decl(decl_text: str, expected_kind: str) -> dict:
+    if not decl_text or not decl_text.strip():
+        return {"error": "empty declaration"}
+
+    normalized_decl = decl_text.strip()
+    if expected_kind == "struct" and not re.match(r"^\s*struct\b", normalized_decl):
+        return {"error": "declaration is not a struct"}
+    if expected_kind == "enum" and not re.match(r"^\s*enum\b", normalized_decl):
+        return {"error": "declaration is not an enum"}
+    if expected_kind == "typedef" and not normalized_decl.lstrip().startswith("typedef"):
+        return {"error": "declaration is not a typedef"}
+
+    name = _extract_decl_name(normalized_decl, expected_kind, None)
+    if not name:
+        return {"error": f"missing {expected_kind} name"}
+
+    existed = _named_type_exists(name)
+    hti_flags = PT_SIL | PT_TYP | PT_EMPTY
+    errors, messages = _parse_decls_python(normalized_decl, hti_flags)
+
+    if errors > 0:
+        return {
+            "error": f"parse failed ({errors} errors)",
+            "details": messages[:5] if messages else [],
+        }
+    if errors < 0:
+        tinfo, _parsed_name, parse_errors = _parse_decl_tinfo(normalized_decl)
+        if not tinfo or tinfo.empty():
+            return {"error": "parse failed", "details": parse_errors[:2]}
+
+        parsed_kind = _kind_from_tinfo(tinfo)
+        if expected_kind in ("struct", "enum") and parsed_kind != expected_kind:
+            return {"error": f"declaration is not a {expected_kind}", "detected_kind": parsed_kind}
+        if expected_kind == "typedef" and not normalized_decl.lstrip().startswith("typedef"):
+            return {"error": "declaration is not a typedef", "detected_kind": parsed_kind}
+
+        ok, set_errors = _apply_named_type(name, tinfo, existed)
+        if not ok:
+            return {"error": "set type failed", "details": set_errors[:2]}
+
+    loaded = _load_named_type(name)
+    if loaded is None:
+        return {"error": "declared type not found after apply", "name": name}
+
+    loaded_kind = _kind_from_tinfo(loaded)
+    if loaded_kind != expected_kind:
+        return {"error": f"declared type kind mismatch: {loaded_kind}", "name": name}
+
     return {
         "name": name,
-        "kind": kind,
-        "replaced": bool(existed),
-        "success": bool(ok),
+        "kind": expected_kind,
+        "created": not existed,
+        "replaced": existed,
+        "success": True,
     }
+
+
+@tool
+@idawrite
+def declare_struct(
+    decl: Annotated[str, "Struct declaration text (e.g. 'struct Name { ... };')"],
+) -> dict:
+    """Declare or update a struct in the local type library."""
+    return _declare_named_decl(decl, "struct")
+
+
+@tool
+@idawrite
+def declare_enum(
+    decl: Annotated[str, "Enum declaration text (e.g. 'enum Name { ... };')"],
+) -> dict:
+    """Declare or update an enum in the local type library."""
+    return _declare_named_decl(decl, "enum")
+
+
+@tool
+@idawrite
+def declare_typedef(
+    decl: Annotated[str, "Typedef declaration text (e.g. 'typedef unsigned int NAME;')"],
+) -> dict:
+    """Declare or update a typedef in the local type library."""
+    return _declare_named_decl(decl, "typedef")
 
 
 # ============================================================================
@@ -545,7 +616,7 @@ def list_structs(
     try:
         qty = ida_typeinf.get_ordinal_qty()  # type: ignore
         substr = pattern.lower() if pattern else None
-        til = idaapi.cvar.idati  # type: ignore
+        til = _get_idati()
 
         for ordinal in range(1, qty + 1):
             try:
@@ -608,7 +679,7 @@ def get_struct_info(
     name = name.strip()
     
     try:
-        til = ida_typeinf.get_idati()
+        til = _get_idati()
         tif = ida_typeinf.tinfo_t()
         
         # 尝试按名称获取类型

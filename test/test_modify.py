@@ -18,6 +18,8 @@ Proxy 参数对应：
 """
 import pytest
 
+from ida_mcp import api_modify
+
 pytestmark = pytest.mark.modify
 
 
@@ -285,3 +287,26 @@ class TestPatchBytes:
         
         assert isinstance(result, list)
         assert result[0].get("error") is not None
+
+
+class TestPatchBytesHelpers:
+    def test_patch_bytes_invalidates_string_cache_on_partial_success(self, monkeypatch):
+        calls = {"invalidate": 0}
+
+        class FakeBytes:
+            @staticmethod
+            def get_bytes(_ea, _size):
+                return b"\x90\x90"
+
+            @staticmethod
+            def patch_byte(ea, _value):
+                if ea == 0x401001:
+                    raise RuntimeError("boom")
+
+        monkeypatch.setattr(api_modify, "ida_bytes", FakeBytes())
+        monkeypatch.setattr(api_modify, "_invalidate_strings_cache", lambda: calls.__setitem__("invalidate", calls["invalidate"] + 1))
+
+        result = api_modify.patch_bytes.__wrapped__([{"address": "0x401000", "bytes": [0x90, 0x91]}])
+
+        assert result[0]["patched"] == 1
+        assert calls["invalidate"] == 1

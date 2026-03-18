@@ -10,6 +10,7 @@
     python test/test.py --analysis      # Analysis 模块（反编译、搜索、基本块等）
     python test/test.py --types         # Types 模块（类型声明、结构体等）
     python test/test.py --modify        # Modify 模块（注释、重命名、补丁等）
+    python test/test.py --modeling      # Modeling 模块（建函数、转 code/data/string）
     python test/test.py --memory        # Memory 模块（读取字节/整数/字符串）
     python test/test.py --stack         # Stack 模块（栈帧变量）
     python test/test.py --debug         # Debug 模块（调试器，需手动配置）
@@ -41,7 +42,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 # 可用的模块 markers
-MODULES = ["core", "analysis", "types", "modify", "memory", "stack", "debug", "resources", "lifecycle"]
+MODULES = ["core", "analysis", "types", "modify", "modeling", "memory", "stack", "debug", "resources", "lifecycle"]
 
 GATEWAY_HOST = "127.0.0.1"
 GATEWAY_PORT = 11338

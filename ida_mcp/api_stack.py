@@ -11,7 +11,7 @@ from typing import Annotated, Optional, List, Dict, Any, Union
 
 from .rpc import tool
 from .sync import idaread, idawrite, wait_for_auto_analysis
-from .utils import parse_address, normalize_list_input, hex_addr
+from .utils import parse_address, normalize_list_input, hex_addr, is_valid_c_identifier
 
 # IDA 模块导入
 try:
@@ -32,6 +32,119 @@ from . import compat  # IDA 8.x/9.x 兼容层
 # 检测 IDA 版本
 IDA_VERSION = getattr(idaapi, 'IDA_SDK_VERSION', 0)
 IDA9_OR_LATER = IDA_VERSION >= 900
+
+PT_SIL = getattr(ida_typeinf, 'PT_SIL', 1) if ida_typeinf is not None else 1
+
+
+def _error(message: str, **extra: Any) -> dict:
+    result = {"error": message}
+    result.update(extra)
+    return result
+
+
+def _parse_stack_tinfo(type_text: str) -> tuple[Any, Optional[str]]:
+    if ida_typeinf is None or idaapi is None:
+        return None, "type APIs unavailable"
+
+    normalized = type_text.strip()
+    if "[" in normalized and normalized.endswith("]"):
+        bracket = normalized.index("[")
+        base = normalized[:bracket].strip()
+        suffix = normalized[bracket:]
+        candidate_decl = f"{base} __ida_mcp_stackvar{suffix};"
+    else:
+        candidate_decl = f"{normalized} __ida_mcp_stackvar;"
+    tif = ida_typeinf.tinfo_t()
+    errors: list[str] = []
+
+    variants = [
+        ("idaapi.parse_decl", lambda: idaapi.parse_decl(tif, idaapi.cvar.idati, candidate_decl, PT_SIL)),  # type: ignore
+        ("ida_typeinf.parse_decl", lambda: ida_typeinf.parse_decl(tif, idaapi.cvar.idati, candidate_decl, PT_SIL)),  # type: ignore
+    ]
+
+    for label, fn in variants:
+        try:
+            _ = fn()
+            if tif and not tif.empty():
+                return tif, None
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+
+    details = "; ".join(errors[:2]) if errors else "parse failed"
+    return None, details
+
+
+def _default_stack_type(size: int) -> str:
+    if size == 1:
+        return "char"
+    if size == 2:
+        return "short"
+    if size == 4:
+        return "int"
+    if size == 8:
+        return "__int64"
+    return f"char[{size}]"
+
+
+def _define_stack_member(f: Any, offset: int, name: str, tif: Any) -> tuple[bool, Optional[str]]:
+    errors: list[str] = []
+
+    if ida_frame is not None:
+        try:
+            if hasattr(ida_frame, "define_stkvar"):
+                if ida_frame.define_stkvar(f, name, offset, tif):  # type: ignore[attr-defined]
+                    return True, None
+                errors.append("define_stkvar returned False")
+        except Exception as exc:
+            errors.append(f"define_stkvar failed: {exc}")
+        try:
+            if hasattr(ida_frame, "add_frame_member"):
+                if ida_frame.add_frame_member(f, name, offset, tif):  # type: ignore[attr-defined]
+                    return True, None
+                errors.append("add_frame_member returned False")
+        except Exception as exc:
+            errors.append(f"add_frame_member failed: {exc}")
+
+    frame = None
+    try:
+        frame = ida_frame.get_frame(f)  # type: ignore
+    except Exception:
+        frame = None
+    if not frame:
+        return False, "no stack frame"
+
+    if idaapi is None:
+        return False, "IDA APIs unavailable"
+
+    size = 1
+    try:
+        size = tif.get_size()
+    except Exception:
+        size = 1
+    if size is None or size <= 0:
+        size = 1
+
+    if size == 1:
+        flag = idaapi.FF_BYTE
+    elif size == 2:
+        flag = idaapi.FF_WORD
+    elif size == 4:
+        flag = idaapi.FF_DWORD
+    elif size == 8:
+        flag = idaapi.FF_QWORD
+    else:
+        flag = idaapi.FF_BYTE
+
+    try:
+        result = compat.add_struc_member(frame, name, offset, flag, None, size)
+    except Exception as exc:
+        errors.append(str(exc))
+        return False, "; ".join(errors)
+
+    if result != 0:
+        errors.append(f"add_struc_member returned {result}")
+        return False, "; ".join(errors)
+    return True, None
 
 
 # ============================================================================
@@ -248,6 +361,7 @@ def declare_stack(
     items: Annotated[List[Dict[str, Any]], "List of {function_address, offset, name, type?, size?}"],
 ) -> List[dict]:
     """Create stack variable(s) at specified offset(s)."""
+    wait_for_auto_analysis()
     results = []
     
     for item in items:
@@ -259,6 +373,19 @@ def declare_stack(
         
         if func_addr is None or offset is None or not name:
             results.append({"error": "missing required fields", "item": item})
+            continue
+
+        if not isinstance(offset, int):
+            results.append(_error("offset must be an integer", item=item))
+            continue
+
+        if not isinstance(size, int) or size <= 0:
+            results.append(_error("size must be a positive integer", item=item))
+            continue
+
+        name = str(name).strip()
+        if not is_valid_c_identifier(name):
+            results.append(_error("name is not a valid C identifier", item=item))
             continue
         
         # 解析函数地址
@@ -274,38 +401,47 @@ def declare_stack(
         if not f:
             results.append({"error": "function not found", "item": item})
             continue
-        
-        # 获取栈帧
-        frame = None
+
+        existing = None
         try:
             frame = ida_frame.get_frame(f)  # type: ignore
+            if frame:
+                existing = compat.get_member_by_name(frame, name)
         except Exception:
-            frame = None
-        
-        if not frame:
-            results.append({"error": "no stack frame", "item": item})
-            continue
-        
-        # 创建栈变量
-        try:
-            # 添加成员到栈帧
-            ok = compat.add_struc_member(
-                frame,
-                name,
-                offset,
-                idaapi.FF_DWORD if size == 4 else (idaapi.FF_QWORD if size == 8 else idaapi.FF_BYTE),
-                None,
-                size
-            )
+            existing = None
+        if existing:
             results.append({
-                "function_address": parsed["value"],
+                "function_address": hex_addr(int(f.start_ea)),
                 "offset": offset,
                 "name": name,
-                "created": ok == 0,
-                "error": None if ok == 0 else f"add_struc_member returned {ok}",
+                "changed": False,
+                "note": "stack variable already exists",
             })
-        except Exception as e:
-            results.append({"error": str(e), "item": item})
+            continue
+
+        declared_type = str(var_type).strip() if var_type else _default_stack_type(size)
+        tif, parse_error = _parse_stack_tinfo(declared_type)
+        if parse_error:
+            results.append(_error(
+                "parse type failed",
+                function_address=hex_addr(int(f.start_ea)),
+                offset=offset,
+                name=name,
+                declared_type=declared_type,
+                details=parse_error,
+            ))
+            continue
+
+        ok, error = _define_stack_member(f, offset, name, tif)
+        results.append({
+            "function_address": hex_addr(int(f.start_ea)),
+            "offset": offset,
+            "name": name,
+            "declared_type": declared_type,
+            "size": size,
+            "changed": bool(ok),
+            "error": error,
+        })
     
     return results
 
@@ -355,13 +491,20 @@ def delete_stack(
             if member:
                 ok = compat.del_struc_member(frame, member.soff)
                 results.append({
-                    "function_address": parsed["value"],
+                    "function_address": hex_addr(int(f.start_ea)),
                     "name": name,
+                    "changed": bool(ok),
                     "deleted": bool(ok),
                     "error": None,
                 })
             else:
-                results.append({"error": "member not found", "item": item})
+                results.append({
+                    "function_address": hex_addr(int(f.start_ea)),
+                    "name": name,
+                    "changed": False,
+                    "deleted": False,
+                    "error": "member not found",
+                })
         except Exception as e:
             results.append({"error": str(e), "item": item})
     

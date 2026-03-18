@@ -1,4 +1,4 @@
-"""Lifecycle API for proxy-side launch and shutdown operations."""
+"""Proxy-side lifecycle operations for launching IDA and shutting down the gateway."""
 from __future__ import annotations
 
 import os
@@ -25,7 +25,7 @@ def _cleanup_reserved_launch_ports(now: Optional[float] = None) -> None:
     """Drop stale or already-registered launch reservations."""
     now = time.monotonic() if now is None else now
     registered_ports = {
-        int(instance["port"])
+        int(instance.get("port"))
         for instance in get_instances()
         if isinstance(instance, dict) and isinstance(instance.get("port"), int)
     }
@@ -54,7 +54,7 @@ def _reserve_launch_port() -> int:
     with _RESERVED_LAUNCH_PORTS_LOCK:
         _cleanup_reserved_launch_ports()
         blocked_ports = {
-            int(instance["port"])
+            int(instance.get("port"))
             for instance in get_instances()
             if isinstance(instance, dict) and isinstance(instance.get("port"), int)
         }
@@ -85,7 +85,7 @@ def open_in_ida(
     file_path: str,
     extra_args: Optional[List[str]] = None,
 ) -> dict:
-    """Launch IDA and request plugin auto-start."""
+    """Launch interactive IDA and request plugin auto-start."""
     try:
         target_ida = get_ida_path()
         if not target_ida:
@@ -98,8 +98,6 @@ def open_in_ida(
         final_file_path = wsl_to_win_path(os.path.abspath(file_path))
         cmd = [target_ida]
         launch_args = list(extra_args or [])
-        if not any(arg.upper() == "-A" for arg in launch_args):
-            launch_args.insert(0, "-A")
         if launch_args:
             cmd.extend(launch_args)
         cmd.append(final_file_path)

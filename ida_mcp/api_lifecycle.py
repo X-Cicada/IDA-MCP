@@ -1,4 +1,4 @@
-"""生命周期 API - IDA 实例退出等运行时控制。"""
+"""IDA lifecycle API - runtime control inside an IDA process."""
 from __future__ import annotations
 
 from typing import Annotated

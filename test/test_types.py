@@ -7,7 +7,9 @@
 4. 测试结构体列表和详情
 
 Proxy 参数对应：
-- declare_type: decl
+- declare_struct: decl
+- declare_enum: decl
+- declare_typedef: decl
 - set_function_prototype: function_address (str), prototype
 - set_local_variable_type: function_address (str), variable_name, new_type
 - set_global_variable_type: variable_name, new_type
@@ -25,61 +27,83 @@ from ida_mcp import api_types
 pytestmark = pytest.mark.types
 
 
-class TestDeclareType:
+class TestDeclareTypes:
     """声明类型测试。"""
 
-    def test_declare_type_uses_python_parser_only(self, monkeypatch):
-        """默认应只走 IDAPython parse_decls 路径。"""
+    def test_declare_named_decl_uses_python_parser_only(self, monkeypatch):
+        """默认应优先走 IDAPython parse_decls 路径。"""
         calls = {"python": 0, "fallback": 0}
+
+        class FakeTinfo:
+            def empty(self):
+                return False
+
+            def is_struct(self):
+                return False
+
+            def is_enum(self):
+                return False
+
+            def is_typedef(self):
+                return True
+
+            def is_union(self):
+                return False
+
+            def get_named_type(self, _til, _name):
+                return True
 
         def fake_python(decls, hti_flags):
             calls["python"] += 1
             return (0, [])
 
-        def fake_fallback(decl_text):
-            calls["fallback"] += 1
-            return {"ok": True}
+        def fake_parse_decl(decl_text):
+            return (FakeTinfo(), "SafeType", [])
 
         monkeypatch.setattr(api_types, "_parse_decls_python", fake_python)
-        monkeypatch.setattr(api_types, "_declare_type_fallback", fake_fallback)
+        monkeypatch.setattr(api_types, "_parse_decl_tinfo", fake_parse_decl)
+        monkeypatch.setattr(api_types, "_named_type_exists", lambda _name: False)
+        monkeypatch.setattr(api_types, "_load_named_type", lambda _name: FakeTinfo())
+        monkeypatch.setattr(api_types, "_apply_named_type", lambda _name, _tinfo, _existed: (calls.__setitem__("fallback", calls["fallback"] + 1) or True, []))
 
-        result = api_types.declare_type.__wrapped__("typedef int SafeType;")
+        result = api_types.declare_typedef.__wrapped__("typedef int SafeType;")
 
-        assert result.get("ok") is True
+        assert result.get("success") is True
         assert calls == {"python": 1, "fallback": 0}
 
     def test_declare_struct(self, tool_caller):
         """测试声明结构体。"""
-        # API 参数名为 decl
-        result = tool_caller("declare_type", {
+        result = tool_caller("declare_struct", {
             "decl": "struct TestStruct { int field1; char field2; };"
         })
-        
+
         if "error" not in result:
-            # API 返回 ok 字段表示成功
-            assert result.get("ok") is True
-    
+            assert result.get("success") is True
+            assert result.get("kind") == "struct"
+
     def test_declare_typedef(self, tool_caller):
         """测试声明 typedef。"""
-        result = tool_caller("declare_type", {
+        result = tool_caller("declare_typedef", {
             "decl": "typedef unsigned int UINT32;"
         })
-        
+
         if "error" not in result:
-            assert result.get("ok") is True
-    
+            assert result.get("success") is True
+            assert result.get("kind") == "typedef"
+
     def test_declare_enum(self, tool_caller):
         """测试声明枚举。"""
-        result = tool_caller("declare_type", {
+        result = tool_caller("declare_enum", {
             "decl": "enum TestEnum { VALUE_A = 0, VALUE_B = 1, VALUE_C = 2 };"
         })
-        
+
         if "error" not in result:
-            assert result.get("ok") is True
-    
+            assert result.get("success") is True
+            assert result.get("kind") == "enum"
+
     def test_declare_complex_struct(self, tool_caller):
         """测试声明复杂结构体。"""
-        result = tool_caller("declare_type", {
+        result = tool_caller("declare_struct", {
             "decl": """
                 struct ComplexStruct {
                     int id;
@@ -93,18 +117,25 @@ class TestDeclareType:
             """
         })
         assert isinstance(result, dict)
-    
+
     def test_declare_invalid(self, tool_caller):
         """测试无效声明。"""
-        result = tool_caller("declare_type", {
+        result = tool_caller("declare_struct", {
             "decl": "invalid syntax here {"
         })
         assert "error" in result
-    
+
     def test_declare_empty(self, tool_caller):
         """测试空声明。"""
-        result = tool_caller("declare_type", {
+        result = tool_caller("declare_struct", {
             "decl": ""
+        })
+        assert "error" in result
+
+    def test_declare_struct_rejects_enum_decl(self, tool_caller):
+        """测试结构体工具拒绝枚举声明。"""
+        result = tool_caller("declare_struct", {
+            "decl": "enum WrongKind { VALUE = 1 };"
         })
         assert "error" in result
 
@@ -199,7 +230,7 @@ class TestSetGlobalVariableType:
     def test_set_global_variable_type_struct(self, tool_caller, first_global):
         """测试设置结构体类型。"""
         # 先声明结构体
-        tool_caller("declare_type", {
+        tool_caller("declare_struct", {
             "decl": "struct TestGlobalType { int a; int b; };"
         })
         
@@ -301,7 +332,7 @@ class TestGetStructInfo:
     def test_get_struct_info(self, tool_caller):
         """测试获取结构体详情。"""
         # 先创建一个测试结构体
-        tool_caller("declare_type", {
+        tool_caller("declare_struct", {
             "decl": "struct TestStructInfo { int field1; char field2; void* field3; };"
         })
         

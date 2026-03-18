@@ -7,7 +7,7 @@
 proxy/
 ├── __init__.py           # 模块导出
 ├── _server.py            # 共享的 FastMCP server (stdio/HTTP 复用)
-├── api_lifecycle.py      # 生命周期 API 实现
+├── lifecycle.py          # proxy 侧生命周期操作
 ├── register_tools.py     # 集中注册所有转发工具
 ├── ida_mcp_proxy.py      # stdio 传输入口 (本文件)
 ├── _http.py              # HTTP 辅助函数

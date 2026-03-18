@@ -22,7 +22,7 @@ from ida_mcp.platform import wsl_to_win_path
 from ida_mcp import config
 from ida_mcp import registry
 from ida_mcp import registry_server
-from ida_mcp.proxy import api_lifecycle
+from ida_mcp.proxy import lifecycle
 from ida_mcp import runtime
 
 pytestmark = pytest.mark.lifecycle
@@ -113,8 +113,8 @@ class TestLifecycleErrors:
 
     def test_open_in_ida_no_config(self, tool_caller):
         """测试未配置 IDA 路径的情况（模拟）。"""
-        with patch("ida_mcp.proxy.api_lifecycle.get_ida_path", return_value=None):
-            result = api_lifecycle.open_in_ida(__file__)
+        with patch("ida_mcp.proxy.lifecycle.get_ida_path", return_value=None):
+            result = lifecycle.open_in_ida(__file__)
         assert "error" in result
         assert "not configured" in result["error"]
 
@@ -126,16 +126,16 @@ class TestLifecycleErrors:
 
     def test_open_in_ida_reserves_incrementing_ports(self):
         """连续启动未注册实例时，端口预留应继续向上分配。"""
-        with patch.dict(api_lifecycle._RESERVED_LAUNCH_PORTS, {}, clear=True):
-            with patch("ida_mcp.proxy.api_lifecycle.get_ida_path", return_value=sys.executable):
-                with patch("ida_mcp.proxy.api_lifecycle.get_ida_default_port", return_value=10000):
-                    with patch("ida_mcp.proxy.api_lifecycle.get_instances", return_value=[]):
-                        with patch("ida_mcp.proxy.api_lifecycle.wsl_to_win_path", side_effect=lambda p: p):
-                            with patch("ida_mcp.proxy.api_lifecycle.normalize_subprocess_cwd", side_effect=lambda p: p):
-                                with patch("ida_mcp.proxy.api_lifecycle._is_port_bindable", return_value=True):
+        with patch.dict(lifecycle._RESERVED_LAUNCH_PORTS, {}, clear=True):
+            with patch("ida_mcp.proxy.lifecycle.get_ida_path", return_value=sys.executable):
+                with patch("ida_mcp.proxy.lifecycle.get_ida_default_port", return_value=10000):
+                    with patch("ida_mcp.proxy.lifecycle.get_instances", return_value=[]):
+                        with patch("ida_mcp.proxy.lifecycle.wsl_to_win_path", side_effect=lambda p: p):
+                            with patch("ida_mcp.proxy.lifecycle.normalize_subprocess_cwd", side_effect=lambda p: p):
+                                with patch("ida_mcp.proxy.lifecycle._is_port_bindable", return_value=True):
                                     with patch("subprocess.Popen") as mock_popen:
-                                        first = api_lifecycle.open_in_ida(__file__)
-                                        second = api_lifecycle.open_in_ida(__file__)
+                                        first = lifecycle.open_in_ida(__file__)
+                                        second = lifecycle.open_in_ida(__file__)
 
         assert first["status"] == "ok"
         assert second["status"] == "ok"
@@ -143,19 +143,38 @@ class TestLifecycleErrors:
         assert second["requested_port"] == 10001
         assert mock_popen.call_args_list[0].kwargs["env"]["IDA_MCP_PORT"] == "10000"
         assert mock_popen.call_args_list[1].kwargs["env"]["IDA_MCP_PORT"] == "10001"
+        assert "-A" not in mock_popen.call_args_list[0].args[0]
+        assert "-A" not in mock_popen.call_args_list[1].args[0]
+
+    def test_open_in_ida_preserves_explicit_extra_args(self):
+        """仅在调用方显式要求时，才把批处理参数传给 IDA。"""
+        with patch.dict(lifecycle._RESERVED_LAUNCH_PORTS, {}, clear=True):
+            with patch("ida_mcp.proxy.lifecycle.get_ida_path", return_value=sys.executable):
+                with patch("ida_mcp.proxy.lifecycle.get_ida_default_port", return_value=10000):
+                    with patch("ida_mcp.proxy.lifecycle.get_instances", return_value=[]):
+                        with patch("ida_mcp.proxy.lifecycle.wsl_to_win_path", side_effect=lambda p: p):
+                            with patch("ida_mcp.proxy.lifecycle.normalize_subprocess_cwd", side_effect=lambda p: p):
+                                with patch("ida_mcp.proxy.lifecycle._is_port_bindable", return_value=True):
+                                    with patch("subprocess.Popen") as mock_popen:
+                                        result = lifecycle.open_in_ida(__file__, extra_args=["-A", "-Llog.txt"])
+
+        assert result["status"] == "ok"
+        cmd = mock_popen.call_args.args[0]
+        assert "-A" in cmd
+        assert "-Llog.txt" in cmd
 
     def test_open_in_ida_releases_reserved_port_when_launch_fails(self):
         """启动失败后，应释放预留端口以便后续重试。"""
-        with patch.dict(api_lifecycle._RESERVED_LAUNCH_PORTS, {}, clear=True):
-            with patch("ida_mcp.proxy.api_lifecycle.get_ida_path", return_value=sys.executable):
-                with patch("ida_mcp.proxy.api_lifecycle.get_ida_default_port", return_value=10000):
-                    with patch("ida_mcp.proxy.api_lifecycle.get_instances", return_value=[]):
-                        with patch("ida_mcp.proxy.api_lifecycle.wsl_to_win_path", side_effect=lambda p: p):
-                            with patch("ida_mcp.proxy.api_lifecycle.normalize_subprocess_cwd", side_effect=lambda p: p):
-                                with patch("ida_mcp.proxy.api_lifecycle._is_port_bindable", return_value=True):
+        with patch.dict(lifecycle._RESERVED_LAUNCH_PORTS, {}, clear=True):
+            with patch("ida_mcp.proxy.lifecycle.get_ida_path", return_value=sys.executable):
+                with patch("ida_mcp.proxy.lifecycle.get_ida_default_port", return_value=10000):
+                    with patch("ida_mcp.proxy.lifecycle.get_instances", return_value=[]):
+                        with patch("ida_mcp.proxy.lifecycle.wsl_to_win_path", side_effect=lambda p: p):
+                            with patch("ida_mcp.proxy.lifecycle.normalize_subprocess_cwd", side_effect=lambda p: p):
+                                with patch("ida_mcp.proxy.lifecycle._is_port_bindable", return_value=True):
                                     with patch("subprocess.Popen", side_effect=RuntimeError("boom")):
-                                        result = api_lifecycle.open_in_ida(__file__)
-            assert api_lifecycle._RESERVED_LAUNCH_PORTS == {}
+                                        result = lifecycle.open_in_ida(__file__)
+            assert lifecycle._RESERVED_LAUNCH_PORTS == {}
 
         assert "error" in result
 

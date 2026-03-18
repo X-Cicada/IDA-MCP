@@ -19,6 +19,8 @@ import pytest
 import time
 from typing import Optional
 
+from ida_mcp import api_debug
+
 pytestmark = pytest.mark.debug
 
 
@@ -158,3 +160,75 @@ class TestDebug9_Cleanup:
         
         DebugState.debugger_started = False
         DebugState.breakpoint_address = None
+
+
+class TestDebugHelpers:
+    def test_dbg_run_to_cleans_temporary_breakpoint(self, monkeypatch):
+        calls = {"added": 0, "deleted": 0, "continued": 0}
+
+        class FakeDbg:
+            BPT_DEFAULT = 0
+
+            @staticmethod
+            def is_debugger_on():
+                return True
+
+            @staticmethod
+            def add_bpt(_addr, *_args):
+                calls["added"] += 1
+                return True
+
+            @staticmethod
+            def continue_process():
+                calls["continued"] += 1
+                return True
+
+            @staticmethod
+            def del_bpt(_addr):
+                calls["deleted"] += 1
+                return True
+
+        monkeypatch.setattr(api_debug, "ida_dbg", FakeDbg())
+        monkeypatch.setattr(api_debug, "idaapi", type("FakeIdaApi", (), {"BADADDR": -1})())
+        monkeypatch.setattr(api_debug, "_wait_for_debugger_event", lambda _timeout=1000: True)
+        monkeypatch.setattr(api_debug, "_breakpoint_exists", lambda _addr: False)
+
+        result = api_debug.dbg_run_to.__wrapped__("0x401000")
+
+        assert result["used_temp_bpt"] is True
+        assert result["cleaned_temp_bpt"] is True
+        assert calls == {"added": 1, "deleted": 1, "continued": 1}
+
+    def test_dbg_read_mem_reports_integer_size(self, monkeypatch):
+        class FakeDbg:
+            @staticmethod
+            def is_debugger_on():
+                return True
+
+            @staticmethod
+            def read_dbg_memory(_addr, _size):
+                return b"\x90\x91"
+
+        monkeypatch.setattr(api_debug, "ida_dbg", FakeDbg())
+
+        result = api_debug.dbg_read_mem.__wrapped__([{"address": "0x401000", "size": 2}])
+
+        assert result[0]["size"] == 2
+        assert isinstance(result[0]["size"], int)
+
+    def test_dbg_write_mem_reports_integer_size(self, monkeypatch):
+        class FakeDbg:
+            @staticmethod
+            def is_debugger_on():
+                return True
+
+            @staticmethod
+            def write_dbg_memory(_addr, data):
+                return len(data)
+
+        monkeypatch.setattr(api_debug, "ida_dbg", FakeDbg())
+
+        result = api_debug.dbg_write_mem.__wrapped__([{"address": "0x401000", "bytes": [0x90, 0x91]}])
+
+        assert result[0]["size"] == 2
+        assert isinstance(result[0]["size"], int)

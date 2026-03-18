@@ -6,7 +6,7 @@
 
 API 参数对应 (IDA API 工具名):
 - get_bytes: addr (逗号分隔), size
-- get_u32/get_u64: addr (逗号分隔)
+- read_scalar: addr (逗号分隔), width, signed
 - get_string: addr (逗号分隔), max_len
 
 运行方式：
@@ -64,48 +64,60 @@ class TestGetBytes:
         assert len(result) == 3
 
 
-class TestGetIntegers:
-    """读取整数测试。"""
-    
-    def test_get_u32(self, tool_caller, first_function_address):
-        """测试读取 u32。"""
-        result = tool_caller("get_u32", {"addr": hex(first_function_address)})
-        
-        # API 返回列表格式
+class TestReadScalar:
+    """读取标量测试。"""
+
+    def test_read_scalar_u32(self, tool_caller, first_function_address):
+        """测试读取 4 字节无符号整数。"""
+        result = tool_caller("read_scalar", {"addr": hex(first_function_address), "width": 4})
+
         assert isinstance(result, list)
         assert len(result) >= 1
         if "error" not in result[0]:
             assert "value" in result[0]
+            assert result[0]["width"] == 4
+            assert result[0]["signed"] is False
             assert 0 <= result[0]["value"] <= 0xFFFFFFFF
-    
-    def test_get_u64(self, tool_caller, first_function_address):
-        """测试读取 u64。"""
-        result = tool_caller("get_u64", {"addr": hex(first_function_address)})
-        
+
+    def test_read_scalar_u64(self, tool_caller, first_function_address):
+        """测试读取 8 字节无符号整数。"""
+        result = tool_caller("read_scalar", {"addr": hex(first_function_address), "width": 8})
+
         assert isinstance(result, list)
         assert len(result) >= 1
         if "error" not in result[0]:
             assert "value" in result[0]
-    
-    def test_get_u8(self, tool_caller, first_function_address):
-        """测试读取 u8。"""
-        result = tool_caller("get_u8", {"addr": hex(first_function_address)})
-        
+            assert result[0]["width"] == 8
+
+    def test_read_scalar_u8(self, tool_caller, first_function_address):
+        """测试读取 1 字节无符号整数。"""
+        result = tool_caller("read_scalar", {"addr": hex(first_function_address), "width": 1})
+
         assert isinstance(result, list)
         assert len(result) >= 1
         if "error" not in result[0]:
             assert "value" in result[0]
+            assert result[0]["width"] == 1
             assert 0 <= result[0]["value"] <= 255
-    
-    def test_get_u16(self, tool_caller, first_function_address):
-        """测试读取 u16。"""
-        result = tool_caller("get_u16", {"addr": hex(first_function_address)})
-        
+
+    def test_read_scalar_u16(self, tool_caller, first_function_address):
+        """测试读取 2 字节无符号整数。"""
+        result = tool_caller("read_scalar", {"addr": hex(first_function_address), "width": 2})
+
         assert isinstance(result, list)
         assert len(result) >= 1
         if "error" not in result[0]:
             assert "value" in result[0]
+            assert result[0]["width"] == 2
             assert 0 <= result[0]["value"] <= 0xFFFF
+
+    def test_read_scalar_rejects_invalid_width(self, tool_caller, first_function_address):
+        """测试拒绝不支持的宽度。"""
+        result = tool_caller("read_scalar", {"addr": hex(first_function_address), "width": 3})
+
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        assert "error" in result[0]
 
 
 class TestGetString:

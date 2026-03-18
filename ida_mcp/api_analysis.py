@@ -3,7 +3,11 @@
 提供工具:
     - decompile           反编译函数 (Hex-Rays)
     - disasm              反汇编函数
-    - linear_disassemble  线性反汇编
+    - linear_disasm       线性反汇编
+    - get_callers         获取函数调用者摘要
+    - get_callees         获取函数被调函数摘要
+    - get_function_signature 获取函数签名
+    - get_pseudocode_lines 获取结构化伪代码行
     - xrefs_to            交叉引用 (到)
     - xrefs_from          交叉引用 (从)
     - xrefs_to_field      结构体字段引用
@@ -40,6 +44,218 @@ from . import compat  # IDA 8.x/9.x 兼容层
 
 
 # ============================================================================
+# 内部辅助
+# ============================================================================
+
+def _resolve_function(query: Union[int, str]) -> dict:
+    """Resolve a function by address or symbol name."""
+    parsed = parse_address(query)
+    if parsed["ok"] and parsed["value"] is not None:
+        ea = parsed["value"]
+    else:
+        try:
+            ea = idaapi.get_name_ea(idaapi.BADADDR, str(query))
+            if ea == idaapi.BADADDR:
+                return {"error": "not found", "query": query}
+        except Exception:
+            return {"error": "invalid address", "query": query}
+
+    if ea is None:
+        return {"error": "invalid address", "query": query}
+
+    try:
+        f = ida_funcs.get_func(ea)
+    except Exception:
+        f = None
+    if not f:
+        return {"error": "function not found", "query": query}
+
+    try:
+        name = idaapi.get_func_name(f.start_ea)
+    except Exception:
+        name = "?"
+
+    return {
+        "query": query,
+        "ea": int(ea),
+        "function": f,
+        "name": name,
+        "start_ea": int(f.start_ea),
+        "end_ea": int(f.end_ea),
+        "error": None,
+    }
+
+
+def _init_hexrays() -> Optional[str]:
+    try:
+        if not ida_hexrays.init_hexrays_plugin():
+            return "failed to init hex-rays"
+    except Exception:
+        return "failed to init hex-rays"
+    return None
+
+
+def _decompile_cfunc(info: dict) -> tuple[Any, Optional[str]]:
+    hexrays_error = _init_hexrays()
+    if hexrays_error:
+        return None, hexrays_error
+
+    try:
+        cfunc = ida_hexrays.decompile(info["start_ea"])
+    except Exception as exc:
+        return None, f"decompile failed: {exc}"
+    if not cfunc:
+        return None, "decompile returned None"
+    return cfunc, None
+
+
+def _decompile_text(info: dict) -> tuple[Optional[str], Optional[str]]:
+    cfunc, error = _decompile_cfunc(info)
+    if error:
+        return None, error
+
+    try:
+        return str(cfunc), None
+    except Exception:
+        return "<print failed>", None
+
+
+def _decode_insn_size(ea: int) -> int:
+    try:
+        insn = idaapi.insn_t()
+        if idaapi.decode_insn(insn, ea):
+            return int(insn.size)
+    except Exception:
+        pass
+    return 0
+
+
+def _is_call_insn(ea: int) -> bool:
+    try:
+        checker = getattr(idaapi, "is_call_insn", None)
+        if callable(checker):
+            return bool(checker(ea))
+    except Exception:
+        pass
+
+    try:
+        mnem = idaapi.print_insn_mnem(ea)
+        if mnem:
+            return str(mnem).lower().startswith("call")
+    except Exception:
+        pass
+
+    try:
+        line = idaapi.generate_disasm_line(ea, 0)
+        if line:
+            return str(line).lstrip().lower().startswith("call")
+    except Exception:
+        pass
+
+    return False
+
+
+def _symbol_name(ea: int) -> Optional[str]:
+    for fn_name in ("get_name", "get_ea_name", "get_func_name"):
+        try:
+            fn = getattr(idaapi, fn_name, None)
+            if callable(fn):
+                value = fn(ea)
+                if value:
+                    return str(value)
+        except Exception:
+            continue
+    return None
+
+
+def _group_call_site(
+    groups: Dict[str, dict],
+    owner_ea: int,
+    owner_name: Optional[str],
+    site_ea: int,
+) -> None:
+    key = hex_addr(owner_ea)
+    bucket = groups.setdefault(
+        key,
+        {
+            "address": key,
+            "name": owner_name,
+            "call_count": 0,
+            "call_sites": [],
+        },
+    )
+    call_site = hex_addr(site_ea)
+    if call_site not in bucket["call_sites"]:
+        bucket["call_sites"].append(call_site)
+        bucket["call_count"] += 1
+
+
+def _sorted_group_items(groups: Dict[str, dict]) -> List[dict]:
+    items = list(groups.values())
+    for item in items:
+        item["call_sites"].sort(key=lambda value: int(value, 16))
+    items.sort(key=lambda item: int(item["address"], 16))
+    return items
+
+
+def _signature_from_typeinfo(info: dict) -> Optional[str]:
+    if idaapi is None:
+        return None
+
+    try:
+        import ida_typeinf  # type: ignore
+    except ImportError:
+        ida_typeinf = None  # type: ignore
+
+    if ida_typeinf is None:
+        return None
+
+    try:
+        tif = ida_typeinf.tinfo_t()
+        if idaapi.get_tinfo(tif, info["start_ea"]):
+            try:
+                return ida_typeinf.print_tinfo(
+                    "",
+                    0,
+                    0,
+                    ida_typeinf.PRTYPE_1LINE,
+                    tif,
+                    info["name"],
+                    "",
+                )  # type: ignore[attr-defined]
+            except Exception:
+                return ida_typeinf.print_tinfo(  # type: ignore[attr-defined]
+                    "",
+                    0,
+                    0,
+                    ida_typeinf.PRTYPE_1LINE,
+                    tif,
+                    "",
+                    "",
+                )
+    except Exception:
+        return None
+
+    return None
+
+
+def _signature_from_pseudocode(info: dict) -> Optional[str]:
+    text, error = _decompile_text(info)
+    if error or not text:
+        return None
+
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        if stripped.endswith("{"):
+            stripped = stripped[:-1].rstrip()
+        if stripped:
+            return stripped
+    return None
+
+
+# ============================================================================
 # 反编译
 # ============================================================================
 
@@ -64,60 +280,19 @@ def decompile(
 
 def _decompile_single(query: str) -> dict:
     """反编译单个函数。"""
-    # 解析地址
-    parsed = parse_address(query)
-    if not parsed["ok"]:
-        # 尝试作为函数名
-        try:
-            ea = idaapi.get_name_ea(idaapi.BADADDR, query)
-            if ea == idaapi.BADADDR:
-                return {"error": "not found", "query": query}
-        except Exception:
-            return {"error": "invalid address", "query": query}
-    else:
-        ea = parsed["value"]
-    
-    if ea is None:
-        return {"error": "invalid address", "query": query}
-    
-    # 初始化 Hex-Rays
-    try:
-        if not ida_hexrays.init_hexrays_plugin():
-            return {"error": "failed to init hex-rays", "query": query}
-    except Exception:
-        return {"error": "failed to init hex-rays", "query": query}
-    
-    # 获取函数
-    try:
-        f = ida_funcs.get_func(ea)
-    except Exception:
-        f = None
-    if not f:
-        return {"error": "function not found", "query": query}
-    
-    # 反编译
-    try:
-        cfunc = ida_hexrays.decompile(f.start_ea)
-    except Exception as e:
-        return {"error": f"decompile failed: {e}", "query": query}
-    if not cfunc:
-        return {"error": "decompile returned None", "query": query}
-    
-    try:
-        name = idaapi.get_func_name(f.start_ea)
-    except Exception:
-        name = "?"
-    
-    try:
-        text = str(cfunc)
-    except Exception:
-        text = "<print failed>"
-    
+    info = _resolve_function(query)
+    if info.get("error"):
+        return info
+
+    text, error = _decompile_text(info)
+    if error:
+        return {"error": error, "query": query}
+
     return {
         "query": query,
-        "name": name,
-        "start_ea": hex_addr(f.start_ea),
-        "end_ea": hex_addr(f.end_ea),
+        "name": info["name"],
+        "start_ea": hex_addr(info["start_ea"]),
+        "end_ea": hex_addr(info["end_ea"]),
         "decompiled": text,
         "error": None,
     }
@@ -149,34 +324,12 @@ def disasm(
 
 def _disasm_single(query: str) -> dict:
     """反汇编单个函数。"""
-    parsed = parse_address(query)
-    if not parsed["ok"]:
-        try:
-            ea = idaapi.get_name_ea(idaapi.BADADDR, query)
-            if ea == idaapi.BADADDR:
-                return {"error": "not found", "query": query}
-        except Exception:
-            return {"error": "invalid address", "query": query}
-    else:
-        ea = parsed["value"]
-    
-    if ea is None:
-        return {"error": "invalid address", "query": query}
-    
-    try:
-        f = ida_funcs.get_func(ea)
-    except Exception:
-        f = None
-    if not f:
-        return {"error": "function not found", "query": query}
-    
-    start = int(f.start_ea)
-    end = int(f.end_ea)
-    
-    try:
-        name = idaapi.get_func_name(f.start_ea)
-    except Exception:
-        name = "?"
+    info = _resolve_function(query)
+    if info.get("error"):
+        return info
+
+    start = info["start_ea"]
+    end = info["end_ea"]
     
     instructions: List[dict] = []
     for head_ea in idautils.Heads(start, end):
@@ -241,7 +394,7 @@ def _disasm_single(query: str) -> dict:
     
     return {
         'query': query,
-        'name': name,
+        'name': info["name"],
         'start_ea': hex_addr(start),
         'end_ea': hex_addr(end),
         'instructions': instructions,
@@ -255,7 +408,7 @@ def _disasm_single(query: str) -> dict:
 
 @tool
 @idaread
-def linear_disassemble(
+def linear_disasm(
     start_address: Annotated[Union[int, str], "Starting address"],
     count: Annotated[int, "Max number of instructions (1..64)"] = 16,
 ) -> dict:
@@ -351,6 +504,183 @@ def linear_disassemble(
         result['truncated'] = True
     
     return result
+
+
+# ============================================================================
+# 调用关系与结构化伪代码
+# ============================================================================
+
+@tool
+@idaread
+def get_callers(
+    addr: Annotated[Union[int, str], "Function address or name"],
+) -> dict:
+    """Get callers grouped by calling function and call sites."""
+    wait_for_auto_analysis()
+    info = _resolve_function(addr)
+    if info.get("error"):
+        return info
+
+    groups: Dict[str, dict] = {}
+
+    try:
+        for xr in idautils.XrefsTo(info["start_ea"], 0):
+            try:
+                site_ea = int(getattr(xr, "frm", 0))
+                if not bool(getattr(xr, "iscode", 0)):
+                    continue
+                if not _is_call_insn(site_ea):
+                    continue
+
+                owner = ida_funcs.get_func(site_ea)
+                if owner:
+                    owner_ea = int(owner.start_ea)
+                    owner_name = idaapi.get_func_name(owner.start_ea)
+                else:
+                    owner_ea = site_ea
+                    owner_name = _symbol_name(site_ea)
+
+                _group_call_site(groups, owner_ea, owner_name, site_ea)
+            except Exception:
+                continue
+    except Exception as exc:
+        return {"error": f"get_callers failed: {exc}", "query": addr}
+
+    items = _sorted_group_items(groups)
+    return {
+        "query": addr,
+        "function": info["name"],
+        "start_ea": hex_addr(info["start_ea"]),
+        "end_ea": hex_addr(info["end_ea"]),
+        "total": len(items),
+        "items": items,
+    }
+
+
+@tool
+@idaread
+def get_callees(
+    addr: Annotated[Union[int, str], "Function address or name"],
+) -> dict:
+    """Get callees grouped by target function and call sites."""
+    wait_for_auto_analysis()
+    info = _resolve_function(addr)
+    if info.get("error"):
+        return info
+
+    groups: Dict[str, dict] = {}
+
+    try:
+        for head_ea in idautils.Heads(info["start_ea"], info["end_ea"]):
+            try:
+                flags = idaapi.get_full_flags(head_ea)
+                if not idaapi.is_code(flags) or not _is_call_insn(head_ea):
+                    continue
+
+                insn_size = _decode_insn_size(head_ea)
+                for xr in idautils.XrefsFrom(head_ea, 0):
+                    target_ea = int(getattr(xr, "to", 0))
+                    if not bool(getattr(xr, "iscode", 0)):
+                        continue
+                    if insn_size > 0 and target_ea == head_ea + insn_size:
+                        continue
+
+                    callee = ida_funcs.get_func(target_ea)
+                    if callee:
+                        callee_ea = int(callee.start_ea)
+                        callee_name = idaapi.get_func_name(callee.start_ea)
+                    else:
+                        callee_ea = target_ea
+                        callee_name = _symbol_name(target_ea)
+
+                    _group_call_site(groups, callee_ea, callee_name, int(head_ea))
+            except Exception:
+                continue
+    except Exception as exc:
+        return {"error": f"get_callees failed: {exc}", "query": addr}
+
+    items = _sorted_group_items(groups)
+    return {
+        "query": addr,
+        "function": info["name"],
+        "start_ea": hex_addr(info["start_ea"]),
+        "end_ea": hex_addr(info["end_ea"]),
+        "total": len(items),
+        "items": items,
+    }
+
+
+@tool
+@idaread
+def get_function_signature(
+    addr: Annotated[Union[int, str], "Function address or name"],
+) -> dict:
+    """Get the best available function signature string."""
+    wait_for_auto_analysis()
+    info = _resolve_function(addr)
+    if info.get("error"):
+        return info
+
+    signature = _signature_from_typeinfo(info)
+    source = "typeinfo"
+    inferred = False
+
+    if not signature:
+        signature = _signature_from_pseudocode(info)
+        source = "pseudocode"
+        inferred = True
+
+    if not signature:
+        signature = f"void {info['name']}(void)"
+        source = "fallback_name"
+        inferred = True
+
+    return {
+        "query": addr,
+        "function": info["name"],
+        "start_ea": hex_addr(info["start_ea"]),
+        "end_ea": hex_addr(info["end_ea"]),
+        "signature": signature,
+        "source": source,
+        "inferred": inferred,
+    }
+
+
+@tool
+@idaread
+def get_pseudocode_lines(
+    addr: Annotated[Union[int, str], "Function address or name"],
+) -> dict:
+    """Get structured pseudocode lines for a function."""
+    wait_for_auto_analysis()
+    info = _resolve_function(addr)
+    if info.get("error"):
+        return info
+
+    text, error = _decompile_text(info)
+    if error:
+        return {"error": error, "query": addr}
+
+    raw_lines = text.splitlines() if text else []
+    while raw_lines and not raw_lines[-1].strip():
+        raw_lines.pop()
+
+    lines = [
+        {
+            "line": index + 1,
+            "text": line,
+        }
+        for index, line in enumerate(raw_lines)
+    ]
+
+    return {
+        "query": addr,
+        "function": info["name"],
+        "start_ea": hex_addr(info["start_ea"]),
+        "end_ea": hex_addr(info["end_ea"]),
+        "total": len(lines),
+        "lines": lines,
+    }
 
 
 # ============================================================================
@@ -713,33 +1043,11 @@ def get_basic_blocks(
 ) -> dict:
     """Get basic blocks with control flow information."""
     wait_for_auto_analysis()
-    # 解析地址
-    parsed = parse_address(addr)
-    if not parsed["ok"]:
-        try:
-            ea = idaapi.get_name_ea(idaapi.BADADDR, str(addr))
-            if ea == idaapi.BADADDR:
-                return {"error": "not found", "query": addr}
-        except Exception:
-            return {"error": "invalid address", "query": addr}
-    else:
-        ea = parsed["value"]
-    
-    if ea is None:
-        return {"error": "invalid address", "query": addr}
-    
-    # 获取函数
-    try:
-        f = ida_funcs.get_func(ea)
-    except Exception:
-        f = None
-    if not f:
-        return {"error": "function not found", "query": addr}
-    
-    try:
-        name = idaapi.get_func_name(f.start_ea)
-    except Exception:
-        name = "?"
+    info = _resolve_function(addr)
+    if info.get("error"):
+        return info
+
+    f = info["function"]
     
     blocks: List[dict] = []
     
@@ -789,7 +1097,7 @@ def get_basic_blocks(
     
     return {
         "query": addr,
-        "function": name,
+        "function": info["name"],
         "start_ea": hex_addr(f.start_ea),
         "end_ea": hex_addr(f.end_ea),
         "total": len(blocks),

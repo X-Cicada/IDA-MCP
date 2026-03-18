@@ -103,6 +103,7 @@ def idaread(fn: F) -> F:
         return _run_in_ida(lambda: fn(*args, **kwargs), write=False, tool_name=fn.__name__, tool_kwargs=kwargs)
     # Preserve the original function's signature for Pydantic/FastMCP
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore
+    wrapper._ida_exec_mode = "read"  # type: ignore[attr-defined]
     return wrapper  # type: ignore
 
 
@@ -121,6 +122,7 @@ def idawrite(fn: F) -> F:
         return _run_in_ida(lambda: fn(*args, **kwargs), write=True, tool_name=fn.__name__, tool_kwargs=kwargs)
     # Preserve the original function's signature for Pydantic/FastMCP
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore
+    wrapper._ida_exec_mode = "write"  # type: ignore[attr-defined]
     return wrapper  # type: ignore
 
 
