@@ -307,6 +307,13 @@ proxy 和直连实例的参数名已经对齐。例如 `rename_function` 在两�
 * 支持 WSL：可以在 WSL 里使用整套工具，并通过 `open_in_ida` 启动 Windows 版 IDA
 * 如果 `enable_stdio` 和 `enable_http` 都关掉，插件不会启动 gateway / transport 栈
 
+### 常见排障
+
+* `http://127.0.0.1:11338/mcp` 是 Streamable HTTP 的 MCP 入口，直接用浏览器或终端裸打开时看起来“卡住”是正常现象；排查健康状态请看 `http://127.0.0.1:11338/internal/healthz`，或者执行 `python command.py gateway status`。
+* 重启 IDA 后，单实例 MCP 服务需要重新向 gateway 注册。在这几秒窗口里，一些 MCP 客户端可能暂时显示 `Tools: (none)`，直到重新做一次 tools discovery。
+* 如果 gateway 已经健康，但客户端在 IDA 重启后仍然看不到工具，优先在客户端里重连 / reload 这个 MCP server，而不是直接判断 proxy 已坏。
+* 只更新仓库目录并不会自动更新 IDA 正在使用的插件副本。要让修复立即生效，需要把 `ida_mcp.py` 和 `ida_mcp/` 目录同步到 IDA 的 `plugins/` 目录。
+
 ### 方式一：HTTP Proxy 模式（推荐）
 
 当独立网关已运行且启用了 HTTP proxy 时，客户端只需要 proxy URL，无需子进程。

@@ -298,6 +298,13 @@ Notes:
 * WSL is supported: you can run the tooling inside WSL and still launch a Windows IDA binary through `open_in_ida`.
 * If both `enable_stdio` and `enable_http` are disabled, the plugin will not start the gateway/transport stack.
 
+### Troubleshooting
+
+* `http://127.0.0.1:11338/mcp` is a Streamable HTTP MCP endpoint. Opening it directly in a browser or terminal may appear to hang; use `http://127.0.0.1:11338/internal/healthz` or `python command.py gateway status` for health checks instead.
+* After restarting IDA, the per-instance MCP server must re-register with the gateway. During that short window, some MCP clients may temporarily show `Tools: (none)` until they refresh tool discovery.
+* If the gateway is healthy but the client still shows no tools after an IDA restart, reconnect or reload the MCP server entry in the client before assuming the proxy is broken.
+* Updating the repository copy alone does not update IDA's live plugin. Copy `ida_mcp.py` and the `ida_mcp/` package into IDA's `plugins/` directory when you want the installed plugin to pick up fixes.
+
 ### Method 1: HTTP Proxy Mode (Recommended)
 
 When the standalone gateway is running and HTTP proxying is enabled, the client only needs the proxy URL.
