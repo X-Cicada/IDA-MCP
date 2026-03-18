@@ -26,6 +26,9 @@ class _SessionStickyMiddleware:
         self._session_id: Optional[str] = None
         self._session_lock = threading.Lock()
 
+    def __getattr__(self, name: str):
+        return getattr(self.app, name)
+
     def _get_cached_session_id(self) -> Optional[str]:
         with self._session_lock:
             return self._session_id

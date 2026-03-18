@@ -5,7 +5,8 @@ import importlib.util
 from pathlib import Path
 
 from fastmcp import FastMCP
-from ida_mcp.proxy.http_server import _SessionStickyMiddleware
+from ida_mcp.proxy.http_server import _SessionStickyMiddleware as ProxySessionStickyMiddleware
+from ida_mcp.registry_server import _SessionStickyMiddleware as GatewaySessionStickyMiddleware
 
 
 def _load_utils_module():
@@ -131,7 +132,7 @@ def _find_header(headers, name: bytes):
 
 def test_session_sticky_middleware_retries_cached_stale_session():
     app = _FakeSessionRecoveringApp()
-    middleware = _SessionStickyMiddleware(app)
+    middleware = ProxySessionStickyMiddleware(app)
     middleware._session_id = "stale-session"
 
     sent_messages = _run_http_app(middleware)
@@ -147,9 +148,25 @@ def test_session_sticky_middleware_retries_cached_stale_session():
 
 def test_session_sticky_middleware_retries_client_supplied_stale_session():
     app = _FakeSessionRecoveringApp()
-    middleware = _SessionStickyMiddleware(app)
+    middleware = ProxySessionStickyMiddleware(app)
 
     sent_messages = _run_http_app(middleware, headers=[(b"mcp-session-id", b"stale-session")])
+
+    assert len(app.calls) == 2
+    assert _find_header(app.calls[0], b"mcp-session-id") == b"stale-session"
+    assert _find_header(app.calls[1], b"mcp-session-id") is None
+    assert sent_messages[0]["type"] == "http.response.start"
+    assert sent_messages[0]["status"] == 200
+    assert _find_header(sent_messages[0]["headers"], b"mcp-session-id") == b"fresh-session"
+    assert middleware._session_id == "fresh-session"
+
+
+def test_gateway_session_sticky_middleware_retries_cached_stale_session():
+    app = _FakeSessionRecoveringApp()
+    middleware = GatewaySessionStickyMiddleware(app)
+    middleware._session_id = "stale-session"
+
+    sent_messages = _run_http_app(middleware)
 
     assert len(app.calls) == 2
     assert _find_header(app.calls[0], b"mcp-session-id") == b"stale-session"
