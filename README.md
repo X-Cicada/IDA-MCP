@@ -57,7 +57,6 @@ The project uses a modular architecture:
 * `list_instances` – List all IDA instances registered in the shared gateway
 * `get_metadata` – IDB metadata (hash/arch/bits/endian)
 * `list_functions` – Paginated function list with optional pattern filter
-* `get_function` – Find function by name or address
 * `list_globals` – Global symbols (non-functions)
 * `list_strings` – Extracted strings
 * `list_local_types` – Local type definitions
@@ -76,7 +75,6 @@ The project uses a modular architecture:
 * `get_callers` – Structured caller summary grouped by function and call site
 * `get_callees` – Structured callee summary grouped by function and call site
 * `get_function_signature` – Best-available function signature string
-* `get_pseudocode_lines` – Structured pseudocode lines for a function
 * `xrefs_to` – Batch cross-references to addresses
 * `xrefs_from` – Batch cross-references from addresses
 * `xrefs_to_field` – Heuristic struct field references
@@ -220,9 +218,36 @@ IDA-MCP/
 
 Closing an IDA instance only deregisters that instance. The standalone gateway keeps running and can accept later instances.
 
-`open_in_ida` is a proxy-side lifecycle tool. It launches the IDA binary resolved from `IDA_PATH` or `config.conf` (`ida_path`) and sets `IDA_MCP_AUTO_START=1` so the plugin comes up automatically. It keeps IDA in normal interactive GUI mode by default; if you want batch/autonomous startup, pass `-A` explicitly in `extra_args`.
+`open_in_ida` is a proxy-side lifecycle tool. It launches the IDA binary resolved from `IDA_PATH` or `config.conf` (`ida_path`), and requests plugin auto-start by setting `IDA_MCP_AUTO_START=1` and a reserved `IDA_MCP_PORT` in the child process environment. It now accepts an explicit `autonomous` parameter. `autonomous=true` adds `-A` and `autonomous=false` launches without `-A`. The default is `true`.
 
-IDA-MCP is WSL-compatible. In a WSL environment, `open_in_ida` can launch a Windows IDA installation from Linux-side tooling, and it automatically converts the target file path into a Windows path before spawning IDA.
+`open_in_ida` uses `IDA_PATH` / `config.conf` to resolve the IDA executable. File staging is optional: when `IDA_MCP_BUNDLE_DIR` or `open_in_ida_bundle_dir` is configured, `open_in_ida` creates a timestamped launch directory under that root and copies the requested file there before launch. If a matching `.i64` or `.idb` already exists, it copies that database too and launches the database path directly so IDA can enter the existing workspace without showing the loader/options confirmation dialog again. When staging is not configured, `open_in_ida` launches the original path directly and still prefers an existing matching database when present.
+
+With the default `autonomous=true`, IDA starts in batch/autonomous mode. That is useful for unattended automation and can reduce some interactive confirmation flows, but it is not the same as a normal manual reverse-engineering session: interactive dialogs may be suppressed, loader/plugin/UI behaviors that expect manual confirmation can differ.
+
+If you want to combine automation with later manual work, use a two-stage flow:
+
+1. Call `open_in_ida(..., autonomous=true)` to let IDA run the automated phase.
+2. Save the generated `.i64/.idb`.
+3. Reopen that database with `open_in_ida(..., autonomous=false)` for normal manual interaction.
+
+If you use WSL as the control side, these are README-only operational recommendations. IDA-MCP does not read them. Recommended Windows-side `%UserProfile%\\.wslconfig`:
+
+```ini
+[wsl2]
+memory=24GB
+processors=16
+swap=6GB
+
+nestedVirtualization=true
+ipv6=true
+
+[experimental]
+autoMemoryReclaim=gradual
+networkingMode=mirrored
+dnsTunneling=true
+firewall=true
+autoProxy=true
+```
 
 ## Transport Overview
 
@@ -250,8 +275,8 @@ The bundled `mcp.json` and the current default config are centered on the HTTP p
 |----------|-------|
 | Management | `check_connection`, `list_instances`, `select_instance` |
 | Lifecycle | `open_in_ida`, `close_ida`, `shutdown_gateway` |
-| Core | `list_functions`, `get_metadata`, `list_strings`, `list_globals`, `list_local_types`, `get_entry_points`, `convert_number`, `get_function`, `list_imports`, `list_exports`, `list_segments`, `get_cursor` |
-| Analysis | `decompile`, `disasm`, `linear_disasm`, `get_callers`, `get_callees`, `get_function_signature`, `get_pseudocode_lines`, `xrefs_to`, `xrefs_from`, `xrefs_to_field`, `find_bytes`, `get_basic_blocks` |
+| Core | `list_functions`, `get_metadata`, `list_strings`, `list_globals`, `list_local_types`, `get_entry_points`, `convert_number`, `list_imports`, `list_exports`, `list_segments`, `get_cursor` |
+| Analysis | `decompile`, `disasm`, `linear_disasm`, `get_callers`, `get_callees`, `get_function_signature`, `xrefs_to`, `xrefs_from`, `xrefs_to_field`, `find_bytes`, `get_basic_blocks` |
 | Modeling | `create_function`, `delete_function`, `make_code`, `undefine_items`, `make_data`, `make_string` |
 | Modify | `set_comment`, `rename_function`, `rename_global_variable`, `rename_local_variable`, `patch_bytes` |
 | Memory | `get_bytes`, `read_scalar`, `get_string` |
@@ -272,8 +297,7 @@ Edit `ida_mcp/config.conf` to customize settings:
 enable_stdio = false
 enable_http = true
 enable_unsafe = true
-
-# coordinator_port = 11337  # legacy compatibility key; internal API now shares http_port
+# wsl_path_bridge = false
 
 # HTTP proxy settings
 # http_host = "127.0.0.1"
@@ -283,8 +307,11 @@ enable_unsafe = true
 # IDA instance settings
 # ida_default_port = 10000
 # ida_path = "C:\\Path\\To\\ida.exe"
+# ida_python = "C:\\Path\\To\\ida-python\\python.exe"
+# open_in_ida_bundle_dir = "D:\\Temp\\ida-mcp"
 
 # General settings
+# gateway_python = "C:\\Path\\To\\python.exe"
 # request_timeout = 30
 # debug = false
 ```
@@ -293,9 +320,26 @@ Notes:
 
 * The gateway host and direct instance host are fixed to `127.0.0.1` for client connections in code.
 * `IDA_PATH` overrides `ida_path` from `config.conf`.
+* `IDA_MCP_PYTHON` overrides `gateway_python` from `config.conf`.
+* `ida_python` records the IDA-side Python selected during installation so the configured environment is visible later.
+* `IDA_MCP_BUNDLE_DIR` overrides `open_in_ida_bundle_dir` from `config.conf`.
 * `IDA_MCP_ENABLE_UNSAFE=1|0` overrides `enable_unsafe` from `config.conf`.
+* `IDA_MCP_WSL_PATH_BRIDGE=1|0` overrides `wsl_path_bridge` from `config.conf`.
+* `gateway_python` is used for the standalone gateway/proxy subprocess. `install.py` recommends filling it explicitly; if left unset, runtime falls back to auto-discovery.
 * `open_in_ida` no longer accepts an `ida_path` tool argument; configure the IDA executable through `IDA_PATH` or `config.conf`.
-* WSL is supported: you can run the tooling inside WSL and still launch a Windows IDA binary through `open_in_ida`.
+* `open_in_ida` sets `IDA_MCP_AUTO_START=1` and `IDA_MCP_PORT=<reserved_port>` for the launched IDA process.
+* `open_in_ida` now takes an `autonomous` parameter; it is not configured through `config.conf`.
+* `autonomous` defaults to `true`, so `open_in_ida` adds `-A` unless you call it with `autonomous=false`.
+* `-A` switches IDA into batch/autonomous startup mode. For the "automate first, inspect later" workflow, save the `.i64/.idb` and reopen it with `autonomous=false`.
+* With `-A`, confirmation dialogs and some loader/plugin/UI flows can be suppressed or behave differently from normal GUI startup.
+* `open_in_ida` only stages files when `IDA_MCP_BUNDLE_DIR` or `open_in_ida_bundle_dir` is configured.
+* When staging is enabled, `open_in_ida` creates `.../<timestamp>/`, copies the requested file, and also copies a matching `.i64`/`.idb` when one exists.
+* When a matching `.i64`/`.idb` exists, `open_in_ida` launches that database path directly to avoid the initial loader/options confirmation flow.
+* When staging is not enabled, `open_in_ida` launches the original path directly.
+* `wsl_path_bridge` is disabled by default. Enable it only when the LLM/client works inside WSL while IDA/Python stay on the Windows host.
+* When `wsl_path_bridge` is enabled, configure both `ida_path` and `open_in_ida_bundle_dir` as **host Windows paths**.
+* With `wsl_path_bridge` enabled, `open_in_ida` converts convertible WSL mount paths such as `/mnt/e/...` into host Windows paths before launching IDA.
+* If `wsl_path_bridge` is enabled and the final launch target cannot be translated into a Windows path, `open_in_ida` returns an error. In that case, configure `open_in_ida_bundle_dir` so the file is staged onto a Windows drive first.
 * If both `enable_stdio` and `enable_http` are disabled, the plugin will not start the gateway/transport stack.
 
 ### Troubleshooting
@@ -408,10 +452,10 @@ python install.py
 
 The installer:
 
-* discovers the local IDA installation on Windows, Linux, or macOS
-* uses IDA's bundled Python to run `pip install -r requirements.txt`
+* first prompts for the IDA install path and IDA Python path; leaving either blank falls back to auto-discovery, which may take a while
+* uses the selected IDA-side Python to run `pip install -r requirements.txt`
 * copies `ida_mcp.py` and `ida_mcp/` into IDA's `plugins/` directory
-* interactively generates the destination `ida_mcp/config.conf`
+* interactively generates the destination `ida_mcp/config.conf` and recommends setting `gateway_python` explicitly to avoid slow runtime auto-discovery
 
 Use `python install.py --dry-run` to verify detection and configuration choices without making changes.
 
@@ -425,6 +469,7 @@ python command.py gateway restart
 python command.py gateway status
 python command.py ida list
 python command.py ida open ./test/samples/simple.exe
+python command.py ida open ./test/samples/simple.exe --interactive
 python command.py ida select --port 10000
 python command.py tool call get_metadata --port 10000
 python command.py resource read ida://functions --port 10000

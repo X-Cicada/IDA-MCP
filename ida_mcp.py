@@ -83,8 +83,8 @@ import ida_kernwin  # type: ignore
 
 from ida_mcp import registry
 from ida_mcp.config import (
-    get_coordinator_host,
-    get_coordinator_port,
+    get_gateway_internal_host,
+    get_gateway_internal_port,
     get_http_bind_host,
     get_http_path,
     get_http_port,
@@ -94,7 +94,7 @@ from ida_mcp.config import (
     is_http_enabled,
     is_unsafe_enabled,
 )
-from ida_mcp.runtime import start_http_proxy_if_coordinator
+from ida_mcp.runtime import start_http_proxy_if_gateway
 from ida_mcp.server_factory import create_mcp_server
 
 _server_thread: threading.Thread | None = None  # 后台 uvicorn 线程 (运行 FastMCP ASGI 服务)
@@ -405,8 +405,8 @@ def _select_start_port(host: str) -> tuple[int, socket.socket | None]:
 
 def _ensure_gateway_ready_for_startup() -> bool:
     """Confirm the standalone gateway is healthy before exposing the instance listener."""
-    gateway_host = get_coordinator_host()
-    gateway_port = get_coordinator_port()
+    gateway_host = get_gateway_internal_host()
+    gateway_port = get_gateway_internal_port()
     _info(f"Checking gateway health at {gateway_host}:{gateway_port} before starting instance MCP listener.")
     if registry.ensure_registry_server():
         _info(f"Gateway is healthy at {gateway_host}:{gateway_port}; continuing instance startup.")
@@ -437,7 +437,7 @@ def _register_with_coordinator(port: int) -> bool:
     _prime_path_caches()
     try:
         registry.init_and_register(port, _cached_input_file, _cached_idb_path)
-        http_proxy_ready = start_http_proxy_if_coordinator()
+        http_proxy_ready = start_http_proxy_if_gateway()
         _reset_heartbeat_failure_tracking()
         _info(f"Registered instance at port={port} pid={os.getpid()} input='{_cached_input_file}' idb='{_cached_idb_path}'")
         if http_proxy_ready:

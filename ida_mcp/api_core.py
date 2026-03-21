@@ -5,7 +5,6 @@
     - list_instances       列出所有已注册实例
     - get_metadata         获取 IDB 元数据
     - list_functions       列出函数
-    - get_function         查找函数
     - list_globals         列出全局变量
     - list_strings         列出字符串
     - list_local_types     列出本地类型
@@ -23,7 +22,7 @@ import hashlib
 from typing import Annotated, Optional, List, Union
 
 from .rpc import tool
-from .sync import idaread, idawrite, wait_for_auto_analysis
+from .sync import idaread
 from .utils import parse_address, paginate, pattern_filter, normalize_arch, hex_addr
 from .compat import get_idati as _get_idati
 from .strings_cache import (

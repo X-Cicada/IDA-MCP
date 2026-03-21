@@ -12,8 +12,8 @@ from typing import Any, Optional
 
 from . import registry
 from .config import (
-    get_coordinator_host,
-    get_coordinator_port,
+    get_gateway_internal_host,
+    get_gateway_internal_port,
     get_http_connect_host,
     get_http_path,
     get_http_port,
@@ -33,9 +33,9 @@ def gateway_status_payload() -> dict[str, Any]:
         "proxy": proxy,
         "instances": instances,
         "count": len(instances),
-        "coordinator": {
-            "host": get_coordinator_host(),
-            "port": get_coordinator_port(),
+        "gateway_internal": {
+            "host": get_gateway_internal_host(),
+            "port": get_gateway_internal_port(),
         },
         "http_proxy": {
             "host": get_http_connect_host(),
@@ -145,10 +145,14 @@ def call_tool(
     }
 
 
-def open_ida(file_path: str, extra_args: Optional[list[str]] = None) -> dict[str, Any]:
+def open_ida(
+    file_path: str,
+    extra_args: Optional[list[str]] = None,
+    autonomous: bool = True,
+) -> dict[str, Any]:
     from .proxy import lifecycle
 
-    result = lifecycle.open_in_ida(file_path, extra_args=extra_args)
+    result = lifecycle.open_in_ida(file_path, extra_args=extra_args, autonomous=autonomous)
     if "error" in result:
         return error_payload("ida_open_failed", str(result["error"]), file_path=file_path)
     return result

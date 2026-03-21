@@ -1,7 +1,7 @@
 """pytest 配置和共享 fixtures。
 
 测试框架设计：
-1. coordinator_available - 检查 gateway 内部 API 是否运行
+1. gateway_internal_available - 检查 gateway 内部 API 是否运行
 2. instance_port - 获取可用 IDA 实例端口
 3. tool_caller - 工具调用函数（支持 stdio 和 http 两种模式）
 4. 前置信息 fixtures（session 级别缓存）:
@@ -49,9 +49,9 @@ def pytest_addoption(parser):
 # ============================================================================
 
 # Gateway 内部 API 地址
-COORDINATOR_HOST = "127.0.0.1"
-COORDINATOR_PORT = 11338
-COORDINATOR_BASE_PATH = "/internal"
+GATEWAY_INTERNAL_HOST = "127.0.0.1"
+GATEWAY_INTERNAL_PORT = 11338
+GATEWAY_INTERNAL_BASE_PATH = "/internal"
 
 # HTTP 代理地址
 HTTP_PROXY_HOST = "127.0.0.1"
@@ -79,7 +79,6 @@ _API_CATEGORIES = {
     "list_instances": "core",
     "get_metadata": "core",
     "list_functions": "core",
-    "get_function": "core",
     "list_globals": "core",
     "list_strings": "core",
     "list_local_types": "core",
@@ -99,7 +98,6 @@ _API_CATEGORIES = {
     "get_callers": "analysis",
     "get_callees": "analysis",
     "get_function_signature": "analysis",
-    "get_pseudocode_lines": "analysis",
     "xrefs_to": "analysis",
     "xrefs_from": "analysis",
     "xrefs_to_field": "analysis",
@@ -170,6 +168,7 @@ def _call_proxy_only_tool_locally(tool_name: str, params: dict) -> Any:
         return lifecycle.open_in_ida(
             params.get("file_path", ""),
             extra_args=params.get("extra_args"),
+            autonomous=bool(params.get("autonomous", True)),
         )
 
     return {"error": f"Unsupported proxy-only tool: {tool_name}"}
@@ -351,7 +350,7 @@ def call_tool_stdio(tool_name: str, params: dict, port: Optional[int] = None) ->
     import time
     start_time = time.perf_counter()
     
-    url = f"http://{COORDINATOR_HOST}:{COORDINATOR_PORT}{COORDINATOR_BASE_PATH}/call"
+    url = f"http://{GATEWAY_INTERNAL_HOST}:{GATEWAY_INTERNAL_PORT}{GATEWAY_INTERNAL_BASE_PATH}/call"
     payload = {
         "tool": tool_name,
         "params": params,
@@ -456,9 +455,9 @@ def _is_http_proxy_available() -> bool:
         return False
 
 
-def _is_coordinator_available() -> bool:
+def _is_gateway_internal_available() -> bool:
     """检查 gateway internal API 是否可用。"""
-    url = f"http://{COORDINATOR_HOST}:{COORDINATOR_PORT}{COORDINATOR_BASE_PATH}/healthz"
+    url = f"http://{GATEWAY_INTERNAL_HOST}:{GATEWAY_INTERNAL_PORT}{GATEWAY_INTERNAL_BASE_PATH}/healthz"
     result = http_get(url)
     return bool(isinstance(result, dict) and result.get("ok"))
 
@@ -486,9 +485,9 @@ def transport_mode(request):
 
 
 @pytest.fixture(scope="session")
-def coordinator_available():
+def gateway_internal_available():
     """检查 gateway internal API 是否可用。"""
-    if not _is_coordinator_available():
+    if not _is_gateway_internal_available():
         pytest.skip("Gateway internal API not available at 127.0.0.1:11338/internal")
     return True
 
@@ -502,9 +501,9 @@ def http_proxy_available():
 
 
 @pytest.fixture(scope="session")
-def instance_port(coordinator_available):
+def instance_port(gateway_internal_available):
     """获取第一个可用实例的端口。"""
-    url = f"http://{COORDINATOR_HOST}:{COORDINATOR_PORT}{COORDINATOR_BASE_PATH}/instances"
+    url = f"http://{GATEWAY_INTERNAL_HOST}:{GATEWAY_INTERNAL_PORT}{GATEWAY_INTERNAL_BASE_PATH}/instances"
     result = http_get(url)
     # API 直接返回列表，不是 {"instances": [...]} 格式
     instances = result if isinstance(result, list) else []

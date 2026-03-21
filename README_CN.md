@@ -60,7 +60,6 @@
 * `list_instances` – 列出共享网关中已注册的 IDA 实例
 * `get_metadata` – IDB 元数据（hash/arch/bits/endian）
 * `list_functions` – 分页函数列表，支持可选模式过滤
-* `get_function` – 通过名称或地址查找函数
 * `list_globals` – 全局符号（非函数）
 * `list_strings` – 提取的字符串（带缓存加速）
 * `list_local_types` – 本地类型定义
@@ -79,7 +78,6 @@
 * `get_callers` – 按函数和调用点聚合的调用者摘要
 * `get_callees` – 按函数和调用点聚合的被调函数摘要
 * `get_function_signature` – 获取当前最可靠的函数签名字符串
-* `get_pseudocode_lines` – 获取函数的结构化伪代码行
 * `xrefs_to` – 批量获取到地址的交叉引用
 * `xrefs_from` – 批量获取从地址的交叉引用
 * `xrefs_to_field` – 启发式结构体字段引用
@@ -225,9 +223,36 @@ IDA-MCP/
 
 关闭某个 IDA 实例只会注销该实例；独立网关会继续运行，后续新实例仍可继续接入。
 
-`open_in_ida` 是 proxy 侧的生命周期工具。它会使用 `IDA_PATH` 或 `config.conf` 中的 `ida_path` 解析 IDA 可执行文件，并带上 `IDA_MCP_AUTO_START=1` 让插件自动启动。默认保持 IDA 的正常交互式 GUI 模式；如果你确实需要 batch/autonomous 模式，再通过 `extra_args` 显式传入 `-A`。
+`open_in_ida` 是 proxy 侧的生命周期工具。它会使用 `IDA_PATH` 或 `config.conf` 中的 `ida_path` 解析 IDA 可执行文件，并通过子进程环境变量 `IDA_MCP_AUTO_START=1` 和预留好的 `IDA_MCP_PORT` 请求插件自动启动。它现在有显式参数 `autonomous`：`autonomous=true` 时追加 `-A`，`autonomous=false` 时不追加，默认值是 `true`。
 
-IDA-MCP 支持 WSL 兼容运行。在 WSL 环境下，`open_in_ida` 可以从 Linux 侧工具链直接启动 Windows 版 IDA，并会在启动前自动把目标文件路径转换成 Windows 路径。
+`open_in_ida` 会通过 `IDA_PATH` / `config.conf` 解析 IDA 可执行文件。文件复制是可选的：只有配置了环境变量 `IDA_MCP_BUNDLE_DIR` 或 `config.conf` 中的 `open_in_ida_bundle_dir` 时，`open_in_ida` 才会在该根目录下创建时间戳目录并复制目标文件。若目标旁边已经存在匹配的 `.i64` 或 `.idb`，它也会一起复制，并直接启动数据库路径，这样 IDA 会直接进入现有界面，而不会再次弹出 loader / 架构等默认打开确认框。未配置 staging 时，`open_in_ida` 会直接打开原始路径；若存在匹配数据库，也会优先打开数据库。
+
+由于默认 `autonomous=true`，IDA 会以 batch/autonomous 模式启动。它更适合无人值守自动化，也可能减少部分交互确认流程，但这不等价于正常手工逆向时的 GUI 启动：交互式对话框可能被抑制，依赖人工确认的 loader / 插件 / UI 流程可能表现不同。
+
+如果你要“先自动化，再人工接管”，推荐两阶段流程：
+
+1. 先用 `open_in_ida(..., autonomous=true)` 跑自动流程。
+2. 保存生成的 `.i64/.idb`。
+3. 再用 `open_in_ida(..., autonomous=false)` 重新打开这个数据库，进入正常人工操作。
+
+如果你把 WSL 作为控制端使用，下面这些只是在 README 中给出的运行环境建议，IDA-MCP 本身不会读取它们。推荐在 Windows 侧的 `%UserProfile%\\.wslconfig` 中配置：
+
+```ini
+[wsl2]
+memory=24GB
+processors=16
+swap=6GB
+
+nestedVirtualization=true
+ipv6=true
+
+[experimental]
+autoMemoryReclaim=gradual
+networkingMode=mirrored
+dnsTunneling=true
+firewall=true
+autoProxy=true
+```
 
 ## 传输概览
 
@@ -257,8 +282,8 @@ proxy 通过 HTTP 和 stdio 暴露同一套转发工具：
 |------|------|
 | 管理 | `check_connection`, `list_instances`, `select_instance` |
 | 生命周期 | `open_in_ida`, `close_ida`, `shutdown_gateway` |
-| 核心 | `list_functions`, `get_metadata`, `list_strings`, `list_globals`, `list_local_types`, `get_entry_points`, `convert_number`, `get_function`, `list_imports`, `list_exports`, `list_segments`, `get_cursor` |
-| 分析 | `decompile`, `disasm`, `linear_disasm`, `get_callers`, `get_callees`, `get_function_signature`, `get_pseudocode_lines`, `xrefs_to`, `xrefs_from`, `xrefs_to_field`, `find_bytes`, `get_basic_blocks` |
+| 核心 | `list_functions`, `get_metadata`, `list_strings`, `list_globals`, `list_local_types`, `get_entry_points`, `convert_number`, `list_imports`, `list_exports`, `list_segments`, `get_cursor` |
+| 分析 | `decompile`, `disasm`, `linear_disasm`, `get_callers`, `get_callees`, `get_function_signature`, `xrefs_to`, `xrefs_from`, `xrefs_to_field`, `find_bytes`, `get_basic_blocks` |
 | 建模 | `create_function`, `delete_function`, `make_code`, `undefine_items`, `make_data`, `make_string` |
 | 修改 | `set_comment`, `rename_function`, `rename_global_variable`, `rename_local_variable`, `patch_bytes` |
 | 内存 | `get_bytes`, `read_scalar`, `get_string` |
@@ -280,9 +305,7 @@ proxy 和直连实例的参数名已经对齐。例如 `rename_function` 在两�
 # enable_stdio = false
 # enable_http = true
 # enable_unsafe = true
-
-# 协调器设置
-# coordinator_port = 11337  # 兼容旧配置；当前内部 API 已并入 http_port
+# wsl_path_bridge = false
 
 # HTTP 代理设置
 # http_host = "127.0.0.1"
@@ -292,8 +315,11 @@ proxy 和直连实例的参数名已经对齐。例如 `rename_function` 在两�
 # IDA 实例设置
 # ida_default_port = 10000
 # ida_path = "C:\\Path\\To\\ida.exe"
+# ida_python = "C:\\Path\\To\\ida-python\\python.exe"
+# open_in_ida_bundle_dir = "D:\\Temp\\ida-mcp"
 
 # 通用设置
+# gateway_python = "C:\\Path\\To\\python.exe"
 # request_timeout = 30
 # debug = false
 ```
@@ -302,9 +328,26 @@ proxy 和直连实例的参数名已经对齐。例如 `rename_function` 在两�
 
 * gateway host 和 direct instance host 对客户端来说在代码里固定为 `127.0.0.1`
 * `IDA_PATH` 的优先级高于 `config.conf` 里的 `ida_path`
+* `IDA_MCP_PYTHON` 的优先级高于 `config.conf` 里的 `gateway_python`
+* `ida_python` 会记录安装时选中的 IDA 侧 Python，方便后续查看当前配置环境
+* `IDA_MCP_BUNDLE_DIR` 的优先级高于 `config.conf` 里的 `open_in_ida_bundle_dir`
 * `IDA_MCP_ENABLE_UNSAFE=1|0` 的优先级高于 `config.conf` 里的 `enable_unsafe`
+* `IDA_MCP_WSL_PATH_BRIDGE=1|0` 的优先级高于 `config.conf` 里的 `wsl_path_bridge`
+* `gateway_python` 用于独立 gateway / proxy 子进程；安装脚本会建议显式填写该字段，留空时运行期才回退到自动探测
 * `open_in_ida` 不再接受 `ida_path` 工具参数；请通过 `IDA_PATH` 或 `config.conf` 配置 IDA 路径
-* 支持 WSL：可以在 WSL 里使用整套工具，并通过 `open_in_ida` 启动 Windows 版 IDA
+* `open_in_ida` 会为启动出来的 IDA 子进程设置 `IDA_MCP_AUTO_START=1` 和 `IDA_MCP_PORT=<reserved_port>`
+* `open_in_ida` 现在使用显式参数 `autonomous`，不再通过 `config.conf` 配置
+* `autonomous` 默认值是 `true`，所以 `open_in_ida` 会默认追加 `-A`；传 `autonomous=false` 时则不会追加
+* `-A` 会让 IDA 进入 batch/autonomous 启动模式；适合“先自动化保存数据库，再以 `autonomous=false` 重新打开做人工分析”
+* 启用 `-A` 后，确认对话框以及部分 loader / 插件 / UI 流程可能被抑制，行为会和正常 GUI 启动不同
+* `open_in_ida` 只有在配置了 `IDA_MCP_BUNDLE_DIR` 或 `open_in_ida_bundle_dir` 时才会复制文件
+* 启用 staging 后，`open_in_ida` 会在 `.../<timestamp>/` 下复制目标文件；如果存在匹配的 `.i64/.idb`，也会一起复制
+* 如果存在匹配的 `.i64/.idb`，`open_in_ida` 会优先直接打开数据库，避免再次出现初始 loader / 架构确认流程
+* 未启用 staging 时，`open_in_ida` 会直接打开原始路径
+* `wsl_path_bridge` 默认关闭；只在“LLM/客户端工作在 WSL，但 IDA/Python 在 Windows 宿主机”这种场景下开启
+* 开启 `wsl_path_bridge` 后，`ida_path` 和 `open_in_ida_bundle_dir` 统一按**宿主机 Windows 路径**填写
+* 开启 `wsl_path_bridge` 后，`open_in_ida` 会把可转换的 WSL 挂载路径（如 `/mnt/e/...`）转换成宿主机 Windows 路径传给 IDA
+* 如果开启 `wsl_path_bridge` 且最终启动目标无法转换成 Windows 路径，则 `open_in_ida` 会返回错误；这时应配置 `open_in_ida_bundle_dir`，先把文件 staging 到 Windows 盘再打开
 * 如果 `enable_stdio` 和 `enable_http` 都关掉，插件不会启动 gateway / transport 栈
 
 ### 常见排障
@@ -417,10 +460,10 @@ python install.py
 
 安装脚本会：
 
-* 在 Windows / Linux / macOS 上自动发现本机 IDA 安装
-* 使用 IDA 自带的 Python 执行 `pip install -r requirements.txt`
+* 先提示填写 IDA 安装路径和 IDA Python 路径；只有留空时才回退到自动发现，扫描可能较慢
+* 使用选中的 IDA 侧 Python 执行 `pip install -r requirements.txt`
 * 将 `ida_mcp.py` 和 `ida_mcp/` 复制到 IDA 的 `plugins/` 目录
-* 交互式生成目标 `ida_mcp/config.conf`
+* 交互式生成目标 `ida_mcp/config.conf`，并建议显式填写 `gateway_python` 以避免运行时慢速自动探测
 
 如果只想先验证发现结果和配置项，可运行 `python install.py --dry-run`。
 
@@ -434,6 +477,7 @@ python command.py gateway restart
 python command.py gateway status
 python command.py ida list
 python command.py ida open ./test/samples/simple.exe
+python command.py ida open ./test/samples/simple.exe --interactive
 python command.py ida select --port 10000
 python command.py tool call get_metadata --port 10000
 python command.py resource read ida://functions --port 10000

@@ -8,6 +8,7 @@
     - enable_stdio: 是否启用 stdio 模式 (默认 false)
     - enable_http: 是否启用 HTTP 代理模式 (默认 true)
     - enable_unsafe: 是否启用 unsafe 工具 (默认 true)
+    - wsl_path_bridge: 是否启用 WSL/Windows 路径桥接 (默认 false)
 
 HTTP 代理配置:
     - http_host: 网关监听地址 (默认 127.0.0.1)
@@ -16,8 +17,12 @@ HTTP 代理配置:
 
 IDA 实例配置 (内部组件，地址固定为 127.0.0.1):
     - ida_default_port: IDA 实例 MCP 端口起始值 (默认 10000)
+    - ida_path: IDA 可执行文件路径
+    - ida_python: IDA Python 可执行文件路径
+    - open_in_ida_bundle_dir: open_in_ida staging 目录 (可选)
 
 通用配置:
+    - gateway_python: 独立 gateway/proxy 子进程使用的 Python (可选)
     - request_timeout: 请求超时时间 (默认 30 秒)
     - debug: 是否启用调试日志 (默认 false)
 """
@@ -25,8 +30,6 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict
-
-from .platform import win_to_wsl_path
 
 # 配置文件路径
 _CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,9 +41,7 @@ _DEFAULT_CONFIG = {
     "enable_stdio": False,   # 是否启用 stdio 模式（协调器）
     "enable_http": True,    # 是否启用 HTTP 代理模式
     "enable_unsafe": True,  # 是否启用 unsafe 工具
-    
-    # 协调器配置（已并入网关；保留键用于兼容旧配置）
-    "coordinator_port": 11337,
+    "wsl_path_bridge": False,  # 是否启用 WSL/Windows 路径桥接
     
     # HTTP 代理配置
     "http_host": "127.0.0.1",
@@ -50,8 +51,11 @@ _DEFAULT_CONFIG = {
     # IDA 实例配置（地址固定为 127.0.0.1，仅端口可配置）
     "ida_default_port": 10000,
     "ida_path": None, # IDA 可执行文件路径
-    
+    "ida_python": None, # IDA Python 可执行文件路径
+    "open_in_ida_bundle_dir": None, # open_in_ida staging 目录
+
     # 通用配置
+    "gateway_python": None, # 独立 gateway/proxy 子进程使用的 Python
     "request_timeout": 30,
     "debug": False,
 }
@@ -143,7 +147,7 @@ def load_config(reload: bool = False) -> Dict[str, Any]:
 
 
 # ============================================================================
-# 网关 / 协调器配置访问函数
+# 网关内部 API 配置访问函数
 # ============================================================================
 
 def get_http_bind_host() -> str:
@@ -160,18 +164,18 @@ def get_http_connect_host() -> str:
     return host
 
 
-def get_coordinator_host() -> str:
-    """获取内部 API 的客户端访问地址。"""
+def get_gateway_internal_host() -> str:
+    """获取 gateway 内部 API 的客户端访问地址。"""
     return get_http_connect_host()
 
 
-def get_coordinator_port() -> int:
-    """获取协调器内部 API 所在端口（与网关端口一致）。"""
+def get_gateway_internal_port() -> int:
+    """获取 gateway 内部 API 所在端口（与网关端口一致）。"""
     return get_http_port()
 
 
-def get_coordinator_url() -> str:
-    """获取协调器内部 API 基础 URL。"""
+def get_gateway_internal_url() -> str:
+    """获取 gateway 内部 API 基础 URL。"""
     return f"http://{get_http_connect_host()}:{get_http_port()}/internal"
 
 
@@ -229,8 +233,6 @@ def get_ida_path() -> str | None:
     1. 环境变量 IDA_PATH
     2. 配置文件中的 ida_path
     3. None
-    
-    如果在 WSL 环境中，会自动将 Windows 路径转换为 WSL 路径。
     """
     path = None
     env_path = os.getenv("IDA_PATH")
@@ -240,10 +242,70 @@ def get_ida_path() -> str | None:
         config = load_config()
         path = config.get("ida_path")
         
-    if path:
-        return win_to_wsl_path(path)
+    if isinstance(path, str):
+        path = path.strip()
+        if path:
+            return path
     return None
 
+
+def get_ida_python() -> str | None:
+    """获取 IDA Python 可执行文件路径。
+
+    优先级:
+    1. 配置文件中的 ida_python
+    2. None
+    """
+    config = load_config()
+    path = config.get("ida_python")
+
+    if isinstance(path, str):
+        path = path.strip()
+        if path:
+            return path
+    return None
+
+
+def get_open_in_ida_bundle_dir() -> str | None:
+    """获取 open_in_ida 使用的 staging 目录。
+
+    优先级:
+    1. 环境变量 IDA_MCP_BUNDLE_DIR
+    2. 配置文件中的 open_in_ida_bundle_dir
+    3. None
+    """
+    env_path = os.getenv("IDA_MCP_BUNDLE_DIR")
+    if env_path and env_path.strip():
+        return env_path.strip()
+
+    config = load_config()
+    configured_path = config.get("open_in_ida_bundle_dir")
+    if isinstance(configured_path, str):
+        configured_path = configured_path.strip()
+        if configured_path:
+            return configured_path
+    return None
+
+
+def get_gateway_python() -> str | None:
+    """获取独立 gateway/proxy 子进程使用的 Python。
+
+    优先级:
+    1. 环境变量 IDA_MCP_PYTHON
+    2. 配置文件中的 gateway_python
+    3. None（交给自动探测）
+    """
+    env_path = os.getenv("IDA_MCP_PYTHON")
+    if env_path and env_path.strip():
+        return env_path.strip()
+
+    config = load_config()
+    configured_path = config.get("gateway_python")
+    if isinstance(configured_path, str):
+        configured_path = configured_path.strip()
+        if configured_path:
+            return configured_path
+    return None
 
 
 # ============================================================================
@@ -292,3 +354,19 @@ def is_unsafe_enabled() -> bool:
 
     config = load_config()
     return _coerce_bool(config.get("enable_unsafe", True), True)
+
+
+def is_wsl_path_bridge_enabled() -> bool:
+    """是否启用 WSL/Windows 路径桥接。
+
+    优先级:
+    1. 环境变量 IDA_MCP_WSL_PATH_BRIDGE
+    2. 配置文件中的 wsl_path_bridge
+    3. 默认值 false
+    """
+    env_value = os.getenv("IDA_MCP_WSL_PATH_BRIDGE")
+    if env_value is not None:
+        return _coerce_bool(env_value, False)
+
+    config = load_config()
+    return _coerce_bool(config.get("wsl_path_bridge", False), False)

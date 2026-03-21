@@ -14,12 +14,36 @@ from typing import Iterable
 
 from ida_mcp.config import parse_config_file
 
+try:
+    from colorama import Fore, Style, just_fix_windows_console
+except ImportError:
+    Fore = None
+    Style = None
+    just_fix_windows_console = None
+
 
 REPO_ROOT = Path(__file__).resolve().parent
 SOURCE_PLUGIN_FILE = REPO_ROOT / "ida_mcp.py"
 SOURCE_PLUGIN_DIR = REPO_ROOT / "ida_mcp"
 SOURCE_CONFIG = SOURCE_PLUGIN_DIR / "config.conf"
 REQUIREMENTS_FILE = REPO_ROOT / "requirements.txt"
+
+_COLORAMA_READY = False
+
+if just_fix_windows_console is not None:
+    just_fix_windows_console()
+    _COLORAMA_READY = True
+
+
+def use_colorama() -> bool:
+    return _COLORAMA_READY and not os.environ.get("NO_COLOR")
+
+
+def color_text(text: str, color: str = "", bright: bool = False) -> str:
+    if not use_colorama() or Fore is None or Style is None:
+        return text
+    prefix = f"{Style.BRIGHT if bright else ''}{color}"
+    return f"{prefix}{text}{Style.RESET_ALL}"
 
 
 def detect_platform() -> str:
@@ -221,6 +245,44 @@ def sort_python_candidates(paths: list[Path]) -> list[Path]:
     return sorted(paths, key=score)
 
 
+def print_section(title: str) -> None:
+    print(f"\n{color_text('==', Fore.CYAN if Fore else '', True)} {color_text(title, Fore.CYAN if Fore else '', True)} {color_text('==', Fore.CYAN if Fore else '', True)}")
+
+
+def print_help(message: str) -> None:
+    print(f"{color_text('[HELP]', Fore.CYAN if Fore else '', True)} {message}")
+
+
+def print_warn(message: str) -> None:
+    print(f"{color_text('[WARN]', Fore.YELLOW if Fore else '', True)} {message}")
+
+
+def print_info(message: str) -> None:
+    print(f"{color_text('[INFO]', Fore.BLUE if Fore else '', True)} {message}")
+
+
+def print_success(message: str) -> None:
+    print(f"{color_text('[OK]', Fore.GREEN if Fore else '', True)} {message}")
+
+
+def print_run(message: str) -> None:
+    print(f"{color_text('[RUN]', Fore.MAGENTA if Fore else '', True)} {message}")
+
+
+def print_progress(step: int, total: int, label: str) -> None:
+    ratio = max(0.0, min(1.0, step / total if total else 1.0))
+    percent = int(ratio * 100)
+    width = 32
+    filled = int(width * ratio)
+    bar = "#" * filled + "-" * (width - filled)
+    print(
+        f"{color_text('[PROGRESS]', Fore.GREEN if Fore else '', True)} "
+        f"{color_text(f'[{bar}]', Fore.GREEN if Fore else '')} "
+        f"{color_text(f'{step}/{total}', Fore.GREEN if Fore else '', True)} "
+        f"{color_text(f'{percent:>3}%', Fore.GREEN if Fore else '', True)}  {label}"
+    )
+
+
 def prompt(message: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default not in (None, "") else ""
     response = input(f"{message}{suffix}: ").strip()
@@ -239,7 +301,7 @@ def prompt_bool(message: str, default: bool) -> bool:
             return True
         if response in {"n", "no"}:
             return False
-        print("Please answer y or n.")
+        print_warn("Please answer y or n.")
 
 
 def prompt_int(message: str, default: int) -> int:
@@ -248,13 +310,27 @@ def prompt_int(message: str, default: int) -> int:
         try:
             return int(response)
         except ValueError:
-            print("Please enter an integer.")
+            print_warn("Please enter an integer.")
+
+
+def prompt_optional_existing_file(message: str, default: str = "", show_default: bool = True) -> str:
+    suffix = f" [{default}]" if default and show_default else ""
+    while True:
+        response = input(f"{message}{suffix}: ").strip()
+        if not response:
+            return default
+        if response == "-":
+            return ""
+        candidate = Path(response).expanduser()
+        if candidate.exists() and candidate.is_file():
+            return str(candidate.resolve())
+        print_warn(f"Path does not exist or is not a file: {candidate}")
 
 
 def choose_path(candidates: list[Path], label: str, platform_name: str) -> Path:
     while True:
         if candidates:
-            print(f"\nDiscovered {label}:")
+            print_section(f"Discovered {label}")
             for idx, candidate in enumerate(candidates, start=1):
                 print(f"  {idx}. {candidate}")
             response = input(
@@ -279,7 +355,53 @@ def choose_path(candidates: list[Path], label: str, platform_name: str) -> Path:
         valid = unique_existing_paths(resolved)
         if valid:
             return valid[0]
-        print(f"Path not valid for {label}: {custom}")
+        print_warn(f"Path not valid for {label}: {custom}")
+
+
+def prompt_ida_executable(platform_name: str, defaults: dict[str, object]) -> Path:
+    print_section("IDA Executable")
+    print_help("Enter the IDA install directory or executable path.")
+    print_help("Press Enter to auto-discover. Scanning may take a while.")
+    while True:
+        response = input("IDA path (file/dir): ").strip()
+        if not response:
+            print_help("Auto-discovering IDA executables...")
+            return choose_path(
+                discover_ida_executables(platform_name, defaults),
+                "IDA executable",
+                platform_name,
+            )
+
+        custom = Path(response).expanduser()
+        valid = unique_existing_paths(resolve_ida_input(custom, platform_name))
+        if valid:
+            return valid[0]
+        print_warn(f"Path not valid for IDA executable: {custom}")
+
+
+def prompt_ida_python(install_dir: Path, platform_name: str) -> Path:
+    print_section("IDA Python")
+    print_help("Enter the IDA Python executable or a directory that contains it.")
+    print_help("Press Enter to auto-discover under the selected IDA install tree.")
+    while True:
+        response = input("IDA Python path (file/dir): ").strip()
+        if not response:
+            print_help(f"Auto-discovering IDA Python under: {install_dir}")
+            return choose_path(
+                find_ida_python_candidates(install_dir, platform_name),
+                "IDA Python executable",
+                platform_name,
+            )
+
+        custom = Path(response).expanduser()
+        if custom.is_dir():
+            resolved = find_ida_python_candidates(custom, platform_name)
+        else:
+            resolved = [custom]
+        valid = unique_existing_paths(resolved)
+        if valid:
+            return valid[0]
+        print_warn(f"Path not valid for IDA Python executable: {custom}")
 
 
 def prompt_existing_file(message: str, default: str) -> str:
@@ -288,7 +410,7 @@ def prompt_existing_file(message: str, default: str) -> str:
         candidate = Path(response).expanduser()
         if candidate.exists() and candidate.is_file():
             return str(candidate.resolve())
-        print(f"Path does not exist or is not a file: {candidate}")
+        print_warn(f"Path does not exist or is not a file: {candidate}")
 
 
 def derive_plugins_dir(ida_executable: Path) -> Path:
@@ -299,7 +421,8 @@ def derive_plugins_dir(ida_executable: Path) -> Path:
 
 
 def run_command(command: list[str], cwd: Path | None = None) -> None:
-    print(f"\n$ {' '.join(command)}")
+    print_section("Run")
+    print_run(f"$ {' '.join(command)}")
     subprocess.run(command, cwd=str(cwd) if cwd else None, check=True)
 
 
@@ -307,7 +430,7 @@ def ensure_pip(ida_python: Path) -> None:
     try:
         run_command([str(ida_python), "-m", "pip", "--version"])
     except subprocess.CalledProcessError:
-        print("\n`pip` was not available in the IDA Python environment. Trying ensurepip...")
+        print_warn("`pip` was not available in the IDA Python environment. Trying ensurepip...")
         run_command([str(ida_python), "-m", "ensurepip", "--upgrade"])
         run_command([str(ida_python), "-m", "pip", "--version"])
 
@@ -354,6 +477,7 @@ def render_config(config: dict[str, object]) -> str:
             f"enable_stdio = {quote_config_value(config['enable_stdio'])}",
             f"enable_http = {quote_config_value(config['enable_http'])}",
             f"enable_unsafe = {quote_config_value(config['enable_unsafe'])}",
+            f"wsl_path_bridge = {quote_config_value(config['wsl_path_bridge'])}",
             "",
             "# HTTP gateway settings (single-port gateway)",
             f"http_host = {quote_config_value(config['http_host'])}",
@@ -363,8 +487,11 @@ def render_config(config: dict[str, object]) -> str:
             "# IDA instance settings",
             f"ida_default_port = {quote_config_value(config['ida_default_port'])}",
             f"ida_path = {quote_config_value(config['ida_path'])}",
+            f"ida_python = {quote_config_value(config['ida_python'])}",
+            f"open_in_ida_bundle_dir = {quote_config_value(config['open_in_ida_bundle_dir'])}",
             "",
             "# General settings",
+            f"gateway_python = {quote_config_value(config['gateway_python'])}",
             f"request_timeout = {quote_config_value(config['request_timeout'])}",
             f"debug = {quote_config_value(config['debug'])}",
             "",
@@ -372,24 +499,33 @@ def render_config(config: dict[str, object]) -> str:
     )
 
 
-def build_config_interactively(defaults: dict[str, object], ida_executable: Path) -> dict[str, object]:
+def build_config_interactively(defaults: dict[str, object], ida_executable: Path, ida_python: Path) -> dict[str, object]:
     config = {
         "enable_stdio": bool(defaults.get("enable_stdio", False)),
         "enable_http": bool(defaults.get("enable_http", True)),
         "enable_unsafe": bool(defaults.get("enable_unsafe", True)),
+        "wsl_path_bridge": bool(defaults.get("wsl_path_bridge", False)),
         "http_host": str(defaults.get("http_host", "127.0.0.1")),
         "http_port": int(defaults.get("http_port", 11338)),
         "http_path": str(defaults.get("http_path", "/mcp")),
         "ida_default_port": int(defaults.get("ida_default_port", 10000)),
         "ida_path": str(ida_executable),
+        "ida_python": str(defaults.get("ida_python") or ida_python),
+        "open_in_ida_bundle_dir": str(defaults.get("open_in_ida_bundle_dir") or ""),
+        "gateway_python": str(defaults.get("gateway_python") or ida_python),
         "request_timeout": int(defaults.get("request_timeout", 30)),
         "debug": bool(defaults.get("debug", False)),
     }
 
-    print("\nConfigure ida_mcp/config.conf")
+    print_section("Configure ida_mcp/config.conf")
+    print_help("Press Enter to keep the current default shown in brackets.")
     config["enable_http"] = prompt_bool("Enable HTTP gateway mode", bool(config["enable_http"]))
     config["enable_stdio"] = prompt_bool("Enable stdio mode", bool(config["enable_stdio"]))
     config["enable_unsafe"] = prompt_bool("Enable unsafe tools", bool(config["enable_unsafe"]))
+    config["wsl_path_bridge"] = prompt_bool(
+        "Enable WSL path bridge (client/LLM in WSL, IDA/Python on Windows host)",
+        bool(config["wsl_path_bridge"]),
+    )
     config["http_host"] = prompt("HTTP gateway bind host", str(config["http_host"]))
     config["http_port"] = prompt_int("HTTP gateway port", int(config["http_port"]))
     config["http_path"] = prompt("HTTP gateway MCP path", str(config["http_path"]))
@@ -401,11 +537,30 @@ def build_config_interactively(defaults: dict[str, object], ida_executable: Path
         "IDA executable path for open_in_ida",
         str(config["ida_path"]),
     )
+    config["ida_python"] = prompt_existing_file(
+        "IDA Python executable path",
+        str(config["ida_python"]),
+    )
+    print_help("Leave open_in_ida_bundle_dir empty to open the original path directly.")
+    print_help("When WSL path bridge is enabled, enter a host Windows path here.")
+    config["open_in_ida_bundle_dir"] = prompt("open_in_ida bundle dir", str(config["open_in_ida_bundle_dir"]))
+    print_help("Set gateway_python explicitly to avoid slow runtime auto-discovery.")
+    if str(config["gateway_python"]).strip():
+        print_help(f"Default gateway_python: {config['gateway_python']}")
+    print_help("Press Enter to keep the default. Use '-' to leave gateway_python unset.")
+    config["gateway_python"] = prompt_optional_existing_file(
+        "Gateway Python executable for standalone gateway/proxy",
+        str(config["gateway_python"]),
+        show_default=False,
+    )
     config["request_timeout"] = prompt_int("Request timeout (seconds)", int(config["request_timeout"]))
     config["debug"] = prompt_bool("Enable debug logging", bool(config["debug"]))
 
+    if not str(config["gateway_python"]).strip():
+        print_help("gateway_python is unset. Runtime will auto-discover a standalone Python interpreter.")
+
     if not config["enable_http"] and not config["enable_stdio"]:
-        print("\nWarning: both HTTP and stdio modes are disabled. The plugin will not start transports.")
+        print_warn("Both HTTP and stdio modes are disabled. The plugin will not start transports.")
         if not prompt_bool("Keep both modes disabled", False):
             config["enable_http"] = True
 
@@ -418,17 +573,27 @@ def print_summary(
     plugins_dir: Path,
     config: dict[str, object],
 ) -> None:
-    print("\nInstallation summary")
-    print(f"  IDA executable : {ida_executable}")
-    print(f"  IDA Python     : {ida_python}")
-    print(f"  Plugins dir    : {plugins_dir}")
-    print(f"  enable_http    : {config['enable_http']}")
-    print(f"  enable_stdio   : {config['enable_stdio']}")
-    print(f"  enable_unsafe  : {config['enable_unsafe']}")
-    print(f"  gateway bind   : {config['http_host']}:{config['http_port']}{config['http_path']}")
-    print(f"  ida_default_port: {config['ida_default_port']}")
-    print(f"  request_timeout: {config['request_timeout']}")
-    print(f"  debug          : {config['debug']}")
+    print_section("Installation Summary")
+    rows = [
+        ("IDA executable", str(ida_executable)),
+        ("IDA Python", str(ida_python)),
+        ("Plugins dir", str(plugins_dir)),
+        ("enable_http", str(config["enable_http"])),
+        ("enable_stdio", str(config["enable_stdio"])),
+        ("enable_unsafe", str(config["enable_unsafe"])),
+        ("wsl_path_bridge", str(config["wsl_path_bridge"])),
+        ("gateway bind", f"{config['http_host']}:{config['http_port']}{config['http_path']}"),
+        ("ida_default_port", str(config["ida_default_port"])),
+        ("ida_python", str(config["ida_python"])),
+        ("open_in_ida bundle dir", str(config["open_in_ida_bundle_dir"] or "(direct source path)")),
+        ("gateway_python", str(config["gateway_python"] or "(unset)")),
+        ("request_timeout", str(config["request_timeout"])),
+        ("debug", str(config["debug"])),
+    ]
+    width = max(len(label) for label, _ in rows)
+    for label, value in rows:
+        padded_label = f"{label:<{width}}"
+        print(f"  {color_text(padded_label, bright=True)} : {value}")
 
 
 def validate_repo_layout() -> None:
@@ -453,45 +618,49 @@ def main() -> int:
     validate_repo_layout()
     platform_name = detect_platform()
     defaults = parse_config_file(str(SOURCE_CONFIG))
+    total_steps = 4 if args.dry_run else 7
 
-    print(f"Detected platform: {platform_name}")
-    ida_executable = choose_path(
-        discover_ida_executables(platform_name, defaults),
-        "IDA executable",
-        platform_name,
-    )
+    print_section("IDA-MCP Installer")
+    print_info(f"Platform: {platform_name}")
+    print_progress(1, total_steps, "Environment ready")
+    ida_executable = prompt_ida_executable(platform_name, defaults)
     install_dir = ida_executable.parent
     plugins_dir = derive_plugins_dir(ida_executable)
-    ida_python = choose_path(
-        find_ida_python_candidates(install_dir, platform_name),
-        "IDA Python executable",
-        platform_name,
-    )
-    config = build_config_interactively(defaults, ida_executable)
+    print_progress(2, total_steps, "IDA executable selected")
+    ida_python = prompt_ida_python(install_dir, platform_name)
+    print_progress(3, total_steps, "IDA Python selected")
+    config = build_config_interactively(defaults, ida_executable, ida_python)
+    print_progress(4, total_steps, "Configuration collected")
     print_summary(ida_executable, ida_python, plugins_dir, config)
 
     if not prompt_bool("Continue with installation", True):
-        print("Installation cancelled.")
+        print_warn("Installation cancelled.")
         return 1
 
     if args.dry_run:
-        print("Dry run finished. No changes were made.")
+        print_section("Dry Run")
+        print_progress(4, total_steps, "Dry run complete")
+        print_info("No changes were made.")
         return 0
 
+    print_progress(5, total_steps, "Installing Python requirements")
     install_requirements(ida_python)
 
     destination_config = plugins_dir / "ida_mcp" / "config.conf"
     if destination_config.exists():
         backup_path = backup_file(destination_config)
-        print(f"Backed up existing config to: {backup_path}")
+        print_help(f"Backed up existing config to: {backup_path}")
 
+    print_progress(6, total_steps, "Copying plugin files")
     copy_plugin_tree(plugins_dir)
     destination_config.parent.mkdir(parents=True, exist_ok=True)
     destination_config.write_text(render_config(config), encoding="utf-8")
 
-    print("\nInstallation completed successfully.")
-    print(f"Plugin files installed to: {plugins_dir}")
-    print(f"Config written to: {destination_config}")
+    print_progress(7, total_steps, "Installation complete")
+    print_section("Done")
+    print_success("Installation completed successfully.")
+    print_info(f"Plugin files installed to: {plugins_dir}")
+    print_info(f"Config written to: {destination_config}")
     return 0
 
 

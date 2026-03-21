@@ -18,9 +18,10 @@ from typing import Any, Dict, List, Optional
 
 from .config import (
     get_http_bind_host,
-    get_coordinator_host,
-    get_coordinator_port,
-    get_coordinator_url,
+    get_gateway_python,
+    get_gateway_internal_host,
+    get_gateway_internal_port,
+    get_gateway_internal_url,
     get_http_path,
     get_http_port,
     get_request_timeout,
@@ -39,9 +40,9 @@ _launch_status: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _coordinator_alive(timeout: float = 0.3) -> bool:
+def _gateway_internal_alive(timeout: float = 0.3) -> bool:
     try:
-        with socket.create_connection((get_coordinator_host(), get_coordinator_port()), timeout=timeout):
+        with socket.create_connection((get_gateway_internal_host(), get_gateway_internal_port()), timeout=timeout):
             return True
     except OSError:
         return False
@@ -125,7 +126,11 @@ def _is_python_executable(path: str | None) -> bool:
 def _candidate_python_executables() -> List[str]:
     candidates: List[str] = []
 
-    for env_name in ("IDA_MCP_PYTHON", "PYTHON", "PYTHON3"):
+    configured_python = get_gateway_python()
+    if configured_python:
+        candidates.append(configured_python)
+
+    for env_name in ("PYTHON", "PYTHON3"):
         value = os.environ.get(env_name)
         if value:
             candidates.append(value)
@@ -134,27 +139,42 @@ def _candidate_python_executables() -> List[str]:
         if value:
             candidates.append(value)
 
-    current_exe = getattr(sys, "executable", "") or ""
-    path_mod = ntpath if ("\\" in current_exe or (len(current_exe) > 1 and current_exe[1] == ":")) else os.path
-    current_dir = path_mod.dirname(current_exe)
-    if current_dir:
+    def add_candidates_near_root(root: str | None) -> None:
+        if not root:
+            return
+        path_mod = ntpath if ("\\" in root or (len(root) > 1 and root[1] == ":")) else os.path
         if path_mod is ntpath or os.name == "nt":
             candidates.extend(
                 [
-                    path_mod.join(current_dir, "ida-python", "python.exe"),
-                    path_mod.join(current_dir, "python", "python.exe"),
-                    path_mod.join(current_dir, "python.exe"),
+                    path_mod.join(root, "python.exe"),
+                    path_mod.join(root, "ida-python", "python.exe"),
+                    path_mod.join(root, "python", "python.exe"),
+                    path_mod.join(root, "Scripts", "python.exe"),
                 ]
             )
         else:
             candidates.extend(
                 [
-                    path_mod.join(current_dir, "ida-python", "python3"),
-                    path_mod.join(current_dir, "ida-python", "python"),
-                    path_mod.join(current_dir, "python", "bin", "python3"),
-                    path_mod.join(current_dir, "python", "bin", "python"),
+                    path_mod.join(root, "bin", "python3"),
+                    path_mod.join(root, "bin", "python"),
+                    path_mod.join(root, "ida-python", "python3"),
+                    path_mod.join(root, "ida-python", "python"),
+                    path_mod.join(root, "python", "bin", "python3"),
+                    path_mod.join(root, "python", "bin", "python"),
                 ]
             )
+
+    current_exe = getattr(sys, "executable", "") or ""
+    path_mod = ntpath if ("\\" in current_exe or (len(current_exe) > 1 and current_exe[1] == ":")) else os.path
+    current_dir = path_mod.dirname(current_exe)
+    add_candidates_near_root(current_dir)
+
+    for value in (
+        getattr(sys, "prefix", None),
+        getattr(sys, "base_prefix", None),
+        getattr(sys, "exec_prefix", None),
+    ):
+        add_candidates_near_root(value)
 
     for name in (["python.exe"] if os.name == "nt" else ["python3", "python"]):
         resolved = shutil.which(name)
@@ -211,7 +231,7 @@ def ensure_registry_server(startup_timeout: float = 3.0) -> bool:
 
         # A listener already exists on the target port. Give it a chance to finish
         # booting into a healthy gateway, but do not spawn a second process.
-        if _coordinator_alive():
+        if _gateway_internal_alive():
             if _wait_for_gateway_ready(max(startup_timeout, 0.5)):
                 _set_launch_status("registry_server", alive=True, last_error=None)
                 return True
@@ -219,7 +239,7 @@ def ensure_registry_server(startup_timeout: float = 3.0) -> bool:
                 "registry_server",
                 alive=False,
                 last_error=(
-                    f"Port {get_coordinator_port()} is already listening on {get_coordinator_host()} "
+                    f"Port {get_gateway_internal_port()} is already listening on {get_gateway_internal_host()} "
                     "but did not respond as a healthy IDA-MCP gateway."
                 ),
             )
@@ -238,7 +258,7 @@ def ensure_registry_server(startup_timeout: float = 3.0) -> bool:
                 "--host",
                 get_http_bind_host(),
                 "--port",
-                str(get_coordinator_port()),
+                str(get_gateway_internal_port()),
             ],
             cwd=_repo_root(),
             log_path=log_path,
@@ -346,7 +366,7 @@ def _request_json(
         headers["Content-Type"] = "application/json"
 
     req = urllib.request.Request(
-        get_coordinator_url() + path,
+        get_gateway_internal_url() + path,
         data=data,
         method=method,
         headers=headers,
@@ -390,7 +410,7 @@ def init_and_register(port: int, input_file: str | None, idb_path: str | None) -
         return
     if not ensure_registry_server():
         raise RuntimeError(
-            f"Gateway not reachable at {get_coordinator_host()}:{get_coordinator_port()} "
+            f"Gateway not reachable at {get_gateway_internal_host()}:{get_gateway_internal_port()} "
             f"({_format_registry_server_failure()})"
         )
 
@@ -409,12 +429,12 @@ def init_and_register(port: int, input_file: str | None, idb_path: str | None) -
         if isinstance(result, dict) and result.get("status") == "ok":
             _register_atexit_once()
             return
-        if not _coordinator_alive() and not ensure_registry_server():
+        if not _gateway_internal_alive() and not ensure_registry_server():
             break
         time.sleep(0.1)
 
     raise RuntimeError(
-        f"Failed to register instance on gateway {get_coordinator_host()}:{get_coordinator_port()} "
+        f"Failed to register instance on gateway {get_gateway_internal_host()}:{get_gateway_internal_port()} "
         f"({_format_registry_server_failure()})"
     )
 

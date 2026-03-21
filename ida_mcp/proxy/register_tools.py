@@ -85,8 +85,9 @@ def register_tools(server: Any) -> None:
     def open_in_ida(
         file_path: Annotated[str, Field(description="Path to the file to open (executable or IDB)")],
         extra_args: Annotated[Optional[List[str]], Field(description="Extra arguments to pass to IDA")] = None,
+        autonomous: Annotated[bool, Field(description="Whether to launch IDA with -A (batch/autonomous mode)")] = True,
     ) -> dict:
-        return lifecycle.open_in_ida(file_path, extra_args=extra_args)
+        return lifecycle.open_in_ida(file_path, extra_args=extra_args, autonomous=autonomous)
 
     @server.tool(description="Close the target IDA instance. Warning: This terminates the process.")
     def close_ida(

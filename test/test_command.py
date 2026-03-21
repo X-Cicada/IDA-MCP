@@ -21,7 +21,7 @@ class TestCommandCli:
                 "proxy": {"alive": True},
                 "instances": [],
                 "count": 0,
-                "coordinator": {"host": "127.0.0.1", "port": 11338},
+                "gateway_internal": {"host": "127.0.0.1", "port": 11338},
                 "http_proxy": {"host": "127.0.0.1", "port": 11338, "path": "/mcp"},
             }
 
@@ -60,7 +60,7 @@ class TestCommandCli:
                 "proxy": {"alive": True, "enabled": True},
                 "instances": [{"pid": 123, "port": 10000, "input_file": "a.exe"}],
                 "count": 1,
-                "coordinator": {"host": "127.0.0.1", "port": 11338},
+                "gateway_internal": {"host": "127.0.0.1", "port": 11338},
                 "http_proxy": {"host": "127.0.0.1", "port": 11338, "path": "/mcp"},
             },
         )

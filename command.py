@@ -46,9 +46,10 @@ def _exit_code_from_payload(payload: dict[str, Any], default: int = EXIT_OK) -> 
 def _print_gateway_status(payload: dict[str, Any]) -> None:
     gateway = payload.get("gateway", {})
     proxy = payload.get("proxy", {})
+    gateway_internal = payload.get("gateway_internal", {})
     print(
         f"Gateway: {'running' if gateway.get('alive') else 'stopped'} "
-        f"at {payload['coordinator']['host']}:{payload['coordinator']['port']}"
+        f"at {gateway_internal.get('host')}:{gateway_internal.get('port')}"
     )
     if gateway.get("log"):
         print(f"Gateway log: {gateway['log']}")
@@ -140,7 +141,11 @@ def _cmd_gateway_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_ida_open(args: argparse.Namespace) -> int:
-    payload = control.open_ida(args.file_path, extra_args=args.extra_arg or None)
+    payload = control.open_ida(
+        args.file_path,
+        extra_args=args.extra_arg or None,
+        autonomous=args.autonomous,
+    )
     if args.json or "error" in payload:
         _dump_json(payload)
     else:
@@ -271,6 +276,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="Extra argument to pass to IDA (repeatable)",
+    )
+    ida_open.add_argument(
+        "--autonomous",
+        dest="autonomous",
+        action="store_true",
+        default=True,
+        help="Launch with -A (default)",
+    )
+    ida_open.add_argument(
+        "--interactive",
+        dest="autonomous",
+        action="store_false",
+        help="Launch without -A",
     )
     ida_open.add_argument("--json", action="store_true", help="Print JSON output")
     ida_open.set_defaults(handler=_cmd_ida_open)

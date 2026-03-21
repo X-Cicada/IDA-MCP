@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-def start_http_proxy_if_coordinator() -> str | None:
+def start_http_proxy_if_gateway() -> str | None:
     """Ensure the client-facing HTTP proxy daemon is running when enabled."""
     from . import registry
     from .config import get_http_url, is_http_enabled

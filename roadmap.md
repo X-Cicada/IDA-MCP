@@ -1,80 +1,95 @@
 # IDA-MCP Roadmap
 
-## Background
+## 当前状态
 
-IDA-MCP already covers the main daily workflow surface: core reads, decompilation/disassembly, cross-references, memory reads, renaming/comments, stack editing, type application, database shaping, debugger control, and `py_eval`.
+项目已经完成从“单实例 + 零散工具”向“多实例网关 + HTTP-first proxy + 结构化工具集”的收敛：
 
-That means the roadmap should not be a growing checklist of small tools. Its job is to identify the remaining high-value gaps where users still reach for `py_eval`, then fill only those gaps with stable MCP APIs.
+- `open_in_ida` 已支持显式 `autonomous`、staging、数据库优先打开、`wsl_path_bridge`
+- gateway / proxy / direct instance 三个入口已经稳定分层
+- 核心分析、建模、类型、调试、资源接口基本齐全
+- `install.py`、`README`、`API.md`、生命周期测试已与当前实现基本对齐
 
-## Principles
+下面的 roadmap 关注的是“进一步降低维护成本”和“把运行体验做稳定”。
 
-- Prefer precise tools over many tools.
-- Add a first-class tool only when existing tools cannot express the workflow cleanly.
-- Prefer structured, machine-friendly output over string scraping or UI-coupled behavior.
-- Keep proxy and direct-instance parameter names aligned.
-- Treat MCP Resources as a stable read-only context surface for direct instance access, not as a proxy-parity target or a replacement for the full tool surface.
-- Every addition must ship with proxy exposure, README/README_CN updates, and tests.
+## 近期目标（P0）
 
-## Current Focus
+### 1. 稳定 `open_in_ida` 启动体验
 
-The current priority is to reduce recurring `py_eval` usage without expanding the tool surface unnecessarily.
+目标：减少 loader / 架构确认框、减少环境差异导致的打开失败。
 
-The main remaining gaps are:
+工作项：
 
-- Structured analysis outputs that are still easier to obtain through ad hoc IDAPython than through stable JSON tools.
-- A small number of high-value type-editing workflows that existing tools cannot model cleanly.
-- Better composition and return structure for existing capabilities where that removes the need for custom scripting.
+- 继续验证 `autonomous=true/false` 在不同 IDA 版本下的行为差异
+- 把 staging / companion database / WSL bridge 的异常信息再做细化
+- 补齐 Windows 宿主机 + WSL 控制端的端到端回归测试
+- 明确哪些场景必须依赖 `open_in_ida_bundle_dir`
 
-Already-shipped capabilities such as function creation/deletion, code/data/string creation, arrays, and undefine operations are baseline functionality, not future roadmap items.
+完成标准：
 
-## Phase 1: Structured Analysis
+- 常见 Windows / WSL 路径场景可预测
+- `open_in_ida` 失败时能直接从返回信息定位配置问题
 
-Goal: replace common string scraping and analysis-oriented `py_eval` snippets with a compact set of structured outputs.
+### 2. 清理遗留工具与兼容残留
 
-Priority areas:
+目标：彻底移除旧工具命名和过时接口认知。
 
-- Function-level caller and callee relationships.
-- Structured function signature extraction.
-- Structured pseudocode views when the Hex-Rays API can provide stable results.
-- CFG output that is machine-friendly and consistent with existing basic-block data.
+工作项：
 
-Acceptance criteria:
+- 确认 `get_function`、`get_pseudocode_function`、`get_pseudocode_lines` 等旧名只保留在“已移除”测试断言里
+- 检查 README / API / wiki 是否还残留旧接口描述
+- 明确后续新增功能只围绕 `decompile`、`disasm`、`get_function_signature` 等现有主接口扩展
 
-- The recommended path for common analysis automation is JSON output from dedicated tools, not parsing free-form text.
-- New outputs compose cleanly with existing `decompile`, `disasm`, `xrefs_*`, and `get_basic_blocks` tools.
-- No new analysis tool is added if the same workflow can be handled by improving the structure of an existing result.
+## 中期目标（P1）
 
-## Phase 2: Minimal Type-Editing Additions
+### 3. 继续降低对 `py_eval` 的依赖
 
-Goal: cover the few type-editing workflows that still require handwritten IDAPython, without turning the API into a CRUD matrix.
+目标：把高频分析/修改场景从“任意 Python”收敛到结构化 MCP 工具。
 
-Priority areas:
+优先补齐方向：
 
-- Explicit struct/enum/typedef declaration tools where the object being edited is clear from the tool name.
-- Stable results that report whether the target already existed and whether the database changed.
+- 更完整的局部变量、类型恢复、结构体字段操作
+- 更细粒度的函数属性、段属性、xref 摘要接口
+- 更稳定的批量修改接口，减少 AI 直接拼 IDAPython
 
-Acceptance criteria:
+完成标准：
 
-- High-frequency type-editing tasks can be completed without `py_eval`.
-- The API stays compact; avoid adding one tool per tiny operation unless that operation is clearly irreducible.
-- Avoid catch-all declaration tools that accept arbitrary C text without a clear target kind.
+- 日常逆向流程主要靠结构化工具完成
+- `py_eval` 更多用于调试、实验和尚未产品化的能力
 
-## Phase 3: Product-Level Expansion
+### 4. 强化网关/代理可观测性
 
-Goal: keep near-term MCP work focused, and reserve broader product scope for clearly separate milestones.
+目标：让多实例、转发、启动失败问题更容易排查。
 
-Longer-term directions already aligned with the README:
+工作项：
 
-- Add a UI layer.
-- Support internal model calls.
-- Add multi-agent A2A automated reverse engineering after LangChain 1.0.0 is ready.
+- 统一 internal API / proxy / instance 的错误格式
+- 补充网关日志、实例选择、端口占用、注册失败的诊断信息
+- 为 `command.py` 增加更清晰的状态输出和错误提示
 
-These are product-level initiatives, not justification for near-term MCP tool growth.
+## 长期目标（P2）
 
-## Exit Criteria
+### 5. 做成更稳定的“可安装产品”
 
-This roadmap is succeeding when:
+目标：降低新环境落地成本。
 
-- common IDA automation uses a small set of dedicated MCP tools plus existing composable primitives;
-- `py_eval` is mostly a fallback for edge cases, not the default path for routine workflows; and
-- the API surface remains intentionally compact instead of expanding into overlapping micro-tools.
+工作项：
+
+- 继续完善 `install.py` 的交互提示、路径校验、WSL 场景校验
+- 补齐面向新用户的配置模板与最小工作流
+- 评估将测试、安装、发布说明进一步标准化
+
+### 6. 提升资源接口与自动化协作能力
+
+目标：让 LLM 更偏向用 resource/tool 合同，而不是依赖上下文猜测。
+
+工作项：
+
+- 扩展 `ida://` 资源覆盖范围
+- 提升 tools / resources 文档一致性
+- 为高频分析路径提供更适合 agent 消费的返回结构
+
+## 不再继续的方向
+
+- 不恢复 `get_function` / `get_pseudocode_function` 这类旧工具名
+- 不鼓励以 `py_eval` 作为主工作流
+- 不把 proxy 和 direct instance 的参数语义再次做分叉
